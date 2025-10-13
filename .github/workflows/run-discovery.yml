@@ -1,0 +1,122 @@
+name: Network Discovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      seed_devices:
+        description: 'Comma-separated list of seed devices (IP:PORT)'
+        required: true
+        default: '192.168.1.1,10.0.0.1:22,172.16.1.1:4446'
+      username:
+        description: 'Username for device authentication'
+        required: true
+        default: 'admin'
+      multiple_credentials:
+        description: 'Use multiple credential sets (comma-separated usernames)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      alt_username:
+        description: 'Alternative username (if multiple_credentials is true)'
+        required: false
+        default: 'cisco'
+      discovery_method:
+        description: 'Discovery method to use'
+        required: true
+        default: 'neighbor_discovery'
+        type: choice
+        options:
+          - neighbor_discovery
+          - subnet_scan
+      max_depth:
+        description: 'Maximum discovery depth'
+        required: false
+        default: '3'
+      timeout:
+        description: 'Connection timeout in seconds'
+        required: false
+        default: '60'
+
+jobs:
+  run-discovery:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      # Pull the discovery service container
+      - name: Pull discovery service container
+        run: |
+          docker pull ghcr.io/${{ github.repository }}/discovery-service:latest
+      
+      # Start the discovery service
+      - name: Start discovery service
+        run: |
+          docker run -d --name discovery-service -p 8080:8080 ghcr.io/${{ github.repository }}/discovery-service:latest
+          # Wait for service to start
+          sleep 5
+      
+      # Run discovery
+      - name: Run discovery
+        id: discovery
+        run: |
+          # Convert comma-separated list to JSON array
+          SEED_DEVICES=$(echo "${{ github.event.inputs.seed_devices }}" | sed 's/,/","/g' | sed 's/^/["/g' | sed 's/$/"]/')
+          
+          # Prepare credentials
+          if [ "${{ github.event.inputs.multiple_credentials }}" == "true" ]; then
+            CREDENTIALS="[
+              {\"username\": \"${{ github.event.inputs.username }}\", \"password\": \"${{ secrets.DEVICE_PASSWORD }}\"},
+              {\"username\": \"${{ github.event.inputs.alt_username }}\", \"password\": \"${{ secrets.ALT_DEVICE_PASSWORD }}\"}
+            ]"
+          else
+            CREDENTIALS="[
+              {\"username\": \"${{ github.event.inputs.username }}\", \"password\": \"${{ secrets.DEVICE_PASSWORD }}\"}
+            ]"
+          fi
+          
+          # Start discovery
+          RESPONSE=$(curl -s -X POST "http://localhost:8080/discover" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"seed_devices\": $SEED_DEVICES,
+              \"credentials\": $CREDENTIALS,
+              \"method\": \"${{ github.event.inputs.discovery_method }}\",
+              \"max_depth\": ${{ github.event.inputs.max_depth }},
+              \"timeout\": ${{ github.event.inputs.timeout }},
+              \"wait_for_results\": true
+            }")
+          
+          # Extract job ID
+          JOB_ID=$(echo $RESPONSE | jq -r '.job_id')
+          echo "job_id=$JOB_ID" >> $GITHUB_OUTPUT
+          
+          # Create export directory
+          mkdir -p discovery_exports
+      
+      # Export discovery data
+      - name: Export discovery data
+        run: |
+          # Export as JSON
+          curl -s "http://localhost:8080/discover/${{ steps.discovery.outputs.job_id }}/export?format=json" > discovery_exports/discovery_data.json
+          
+          # Export device inventory
+          curl -s "http://localhost:8080/discover/${{ steps.discovery.outputs.job_id }}/export/device_inventory" > discovery_exports/device_inventory.csv
+          
+          # Export interface inventory
+          curl -s "http://localhost:8080/discover/${{ steps.discovery.outputs.job_id }}/export/interface_inventory" > discovery_exports/interface_inventory.csv
+          
+          # Export topology visualization
+          curl -s "http://localhost:8080/discover/${{ steps.discovery.outputs.job_id }}/topology" > discovery_exports/topology.html
+      
+      # Upload artifacts
+      - name: Upload discovery results
+        uses: actions/upload-artifact@v3
+        with:
+          name: discovery-results
+          path: discovery_exports/
+          retention-days: 7
