@@ -7,12 +7,19 @@ This module provides a FastAPI application for network discovery operations.
 import os
 import logging
 import json
-from datetime import datetime
+from datetime import datetime, date
 from typing import Dict, List, Any, Optional
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Query
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+
+# Custom JSON encoder to handle datetime objects
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        return super().default(obj)
 
 from app.discovery import NetworkDiscovery
 from app.registry import DiscoveryMethodRegistry
@@ -246,11 +253,15 @@ def get_discovery_devices(
 
 
 @app.get("/discover/{job_id}/topology", response_class=HTMLResponse)
-def get_discovery_topology(job_id: str):
+def get_discovery_topology(job_id: str, debug: bool = False):
     """
     Get network topology visualization for a job.
     
     Returns an HTML page with interactive network visualization.
+    
+    Parameters:
+    - job_id: The job ID
+    - debug: If true, returns detailed error information in the response
     """
     if job_id not in discovery_results:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -260,21 +271,69 @@ def get_discovery_topology(job_id: str):
     if "result" not in result or result["status"] == "pending":
         return HTMLResponse(content="<html><body><h1>Discovery in progress</h1><p>Please check back later.</p></body></html>")
     
-    # Create topology data
-    topology_data = {
-        "devices": result["result"].get("devices", {}),
-        "connections": result["result"].get("connections", [])
-    }
-    
-    # Export to HTML
-    export_file = f"data/exports/{job_id}_topology.html"
-    TopologyExporter.export_to_html(topology_data, export_file)
-    
-    # Read the HTML file
-    with open(export_file, 'r') as f:
-        html_content = f.read()
-    
-    return HTMLResponse(content=html_content)
+    try:
+        # Create topology data
+        devices = result["result"].get("devices", {})
+        connections = result["result"].get("connections", [])
+        
+        # Log what we're working with
+        logger.info(f"Job {job_id} has {len(devices)} devices and {len(connections)} connections")
+        
+        # Check if we have any data to visualize
+        if not devices:
+            error_msg = "No devices found in discovery results"
+            logger.error(error_msg)
+            return HTMLResponse(content=f"<html><body><h1>No topology data</h1><p>{error_msg}</p></body></html>")
+        
+        topology_data = {
+            "devices": devices,
+            "connections": connections
+        }
+        
+        # Export to HTML
+        try:
+            # Ensure directory exists
+            os.makedirs("/app/data/exports", exist_ok=True)
+        except Exception as e:
+            logger.warning(f"Error creating exports directory: {str(e)}")
+            
+        export_file = f"/app/data/exports/{job_id}_topology.html"
+        logger.info(f"Exporting topology to {export_file}")
+        
+        # Try to export the topology
+        export_result = TopologyExporter.export_to_html(topology_data, export_file)
+        if not export_result:
+            error_msg = f"Failed to export topology to HTML for job {job_id}"
+            logger.error(error_msg)
+            if debug:
+                # Return more detailed error info if debug mode
+                return HTMLResponse(content=f"<html><body><h1>Error generating topology</h1><p>{error_msg}</p><pre>Devices: {len(devices)}\nConnections: {len(connections)}\nExport file: {export_file}</pre></body></html>")
+            else:
+                return HTMLResponse(content=f"<html><body><h1>Error generating topology</h1><p>{error_msg}</p><p>Add '?debug=true' to the URL for more details.</p></body></html>")
+        
+        # Read the HTML file
+        try:
+            with open(export_file, 'r') as f:
+                html_content = f.read()
+            
+            return HTMLResponse(content=html_content)
+        except Exception as e:
+            error_msg = f"Error reading topology HTML file: {str(e)}"
+            logger.error(error_msg)
+            if debug:
+                return HTMLResponse(content=f"<html><body><h1>Error reading topology</h1><p>{error_msg}</p><pre>File path: {export_file}</pre></body></html>")
+            else:
+                return HTMLResponse(content=f"<html><body><h1>Error reading topology</h1><p>{error_msg}</p><p>Add '?debug=true' to the URL for more details.</p></body></html>")
+    except Exception as e:
+        error_msg = f"Error generating topology visualization: {str(e)}"
+        logger.error(error_msg)
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(tb)
+        if debug:
+            return HTMLResponse(content=f"<html><body><h1>Error generating topology</h1><p>{error_msg}</p><pre>{tb}</pre></body></html>")
+        else:
+            return HTMLResponse(content=f"<html><body><h1>Error generating topology</h1><p>{error_msg}</p><p>Add '?debug=true' to the URL for more details.</p></body></html>")
 
 
 @app.get("/discover/{job_id}/export")
@@ -291,7 +350,7 @@ def export_discovery_data(
     - format: Export format (json, csv, html)
     - include_configs: Whether to include device configurations in the export
     
-    Returns a file download or a link to the exported file.
+    Returns a file download.
     """
     if job_id not in discovery_results:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -314,30 +373,31 @@ def export_discovery_data(
         # Export to JSON
         export_file = f"{export_dir}/discovery_data.json"
         with open(export_file, 'w') as f:
-            json.dump(result["result"], f, indent=2, default=str)
+            json.dump(result["result"], f, indent=2, cls=DateTimeEncoder)
         
+        # Always return as attachment for download
         return FileResponse(
             path=export_file,
             filename=f"discovery_{job_id}.json",
-            media_type="application/json"
+            media_type="application/json",
+            headers={"Content-Disposition": f"attachment; filename=discovery_{job_id}.json"}
         )
         
     elif format == "csv":
         # Export device inventory to CSV
         devices = result["result"].get("devices", {})
         inventory_file = f"{export_dir}/device_inventory.csv"
-        interface_file = f"{export_dir}/interface_inventory.csv"
         
+        # Generate the CSV file
         ConfigExporter.export_inventory_report(devices, inventory_file)
-        ConfigExporter.export_interface_report(devices, interface_file)
         
-        return {
-            "status": "success",
-            "files": {
-                "device_inventory": f"/discover/{job_id}/export/device_inventory",
-                "interface_inventory": f"/discover/{job_id}/export/interface_inventory"
-            }
-        }
+        # Return the file as an attachment
+        return FileResponse(
+            path=inventory_file,
+            filename=f"device_inventory_{job_id}.csv",
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=device_inventory_{job_id}.csv"}
+        )
         
     elif format == "html":
         # Export topology to HTML
@@ -352,7 +412,8 @@ def export_discovery_data(
         return FileResponse(
             path=export_file,
             filename=f"topology_{job_id}.html",
-            media_type="text/html"
+            media_type="text/html",
+            headers={"Content-Disposition": f"attachment; filename=topology_{job_id}.html"}
         )
         
     elif format == "configs":
@@ -361,13 +422,37 @@ def export_discovery_data(
             devices = result["result"].get("devices", {})
             config_dir = f"{export_dir}/configs"
             
+            # Create a zip file with all configs
+            zip_file = f"{export_dir}/configs_{job_id}.zip"
+            
+            # Ensure the configs directory exists
+            try:
+                os.makedirs(config_dir, exist_ok=True)
+            except Exception as e:
+                logger.warning(f"Error creating config directory: {str(e)}")
+            
+            # Export configs to directory
             ConfigExporter.export_raw_configs(devices, config_dir)
             
-            return {
-                "status": "success",
-                "message": f"Exported {len(devices)} device configurations",
-                "path": config_dir
-            }
+            # Create a zip file of the configs
+            import zipfile
+            try:
+                with zipfile.ZipFile(zip_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for root, dirs, files in os.walk(config_dir):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            zipf.write(file_path, os.path.relpath(file_path, config_dir))
+                
+                # Return the zip file as an attachment
+                return FileResponse(
+                    path=zip_file,
+                    filename=f"configs_{job_id}.zip",
+                    media_type="application/zip",
+                    headers={"Content-Disposition": f"attachment; filename=configs_{job_id}.zip"}
+                )
+            except Exception as e:
+                logger.error(f"Error creating zip file: {str(e)}")
+                return {"status": "error", "message": f"Error creating zip file: {str(e)}"}
         else:
             return {"status": "error", "message": "Configs not included in export"}
             
@@ -378,30 +463,66 @@ def export_discovery_data(
 @app.get("/discover/{job_id}/export/device_inventory")
 def export_device_inventory(job_id: str):
     """Export device inventory to CSV."""
-    export_file = f"data/exports/{job_id}/device_inventory.csv"
+    export_file = f"/app/data/exports/{job_id}/device_inventory.csv"
     
     if not os.path.exists(export_file):
-        raise HTTPException(status_code=404, detail="Export file not found")
+        # Try to generate the file if it doesn't exist
+        if job_id in discovery_results and "result" in discovery_results[job_id]:
+            result = discovery_results[job_id]
+            devices = result["result"].get("devices", {})
+            
+            # Create export directory
+            export_dir = f"/app/data/exports/{job_id}"
+            try:
+                os.makedirs(export_dir, exist_ok=True)
+            except PermissionError:
+                logger.warning(f"Permission denied creating directory {export_dir}")
+                export_dir = "/app/data/exports"
+                export_file = f"{export_dir}/device_inventory_{job_id}.csv"
+            
+            # Generate the CSV file
+            ConfigExporter.export_inventory_report(devices, export_file)
+        else:
+            raise HTTPException(status_code=404, detail="Export file not found and job data unavailable")
     
     return FileResponse(
         path=export_file,
         filename=f"device_inventory_{job_id}.csv",
-        media_type="text/csv"
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=device_inventory_{job_id}.csv"}
     )
 
 
 @app.get("/discover/{job_id}/export/interface_inventory")
 def export_interface_inventory(job_id: str):
     """Export interface inventory to CSV."""
-    export_file = f"data/exports/{job_id}/interface_inventory.csv"
+    export_file = f"/app/data/exports/{job_id}/interface_inventory.csv"
     
     if not os.path.exists(export_file):
-        raise HTTPException(status_code=404, detail="Export file not found")
+        # Try to generate the file if it doesn't exist
+        if job_id in discovery_results and "result" in discovery_results[job_id]:
+            result = discovery_results[job_id]
+            devices = result["result"].get("devices", {})
+            
+            # Create export directory
+            export_dir = f"/app/data/exports/{job_id}"
+            try:
+                os.makedirs(export_dir, exist_ok=True)
+            except PermissionError:
+                logger.warning(f"Permission denied creating directory {export_dir}")
+                export_dir = "/app/data/exports"
+                export_file = f"{export_dir}/interface_inventory_{job_id}.csv"
+            
+            # Generate the CSV file
+            ConfigExporter.export_interface_report(devices, export_file)
+        else:
+            raise HTTPException(status_code=404, detail="Export file not found and job data unavailable")
     
     return FileResponse(
         path=export_file,
         filename=f"interface_inventory_{job_id}.csv",
-        media_type="text/csv"
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=interface_inventory_{job_id}.csv"}
     )
 
 

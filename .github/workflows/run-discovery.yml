@@ -39,6 +39,14 @@ on:
         description: 'Connection timeout in seconds'
         required: false
         default: '60'
+      max_wait_time:
+        description: 'Maximum time to wait for discovery completion (seconds)'
+        required: false
+        default: '1800'
+      poll_interval:
+        description: 'Status check interval (seconds)'
+        required: false
+        default: '10'
 
 jobs:
   run-discovery:
@@ -112,7 +120,8 @@ jobs:
             echo "Using single credential set"
           fi
           
-          # Start discovery
+          # Start discovery - IMPORTANT: We're NOT using wait_for_results=true here
+          # because we want to handle the waiting with proper polling
           RESPONSE=$(curl -s -X POST "http://localhost:8080/discover" \
             -H "Content-Type: application/json" \
             -d "{
@@ -120,31 +129,90 @@ jobs:
               \"credentials\": $CREDENTIALS,
               \"method\": \"${{ github.event.inputs.discovery_method }}\",
               \"max_depth\": ${{ github.event.inputs.max_depth }},
-              \"timeout\": ${{ github.event.inputs.timeout }},
-              \"wait_for_results\": true
+              \"timeout\": ${{ github.event.inputs.timeout }}
             }")
           
           # Extract job ID
           JOB_ID=$(echo $RESPONSE | jq -r '.job_id')
+          if [ -z "$JOB_ID" ] || [ "$JOB_ID" == "null" ]; then
+            echo "Failed to get job ID from response:"
+            echo $RESPONSE
+            exit 1
+          fi
+          
+          echo "Job ID: $JOB_ID"
           echo "job_id=$JOB_ID" >> $GITHUB_OUTPUT
           
           # Create export directory
           mkdir -p discovery_exports
+          
+          # Wait for discovery to complete with timeout
+          echo "Waiting for discovery job to complete..."
+          MAX_WAIT_TIME=${{ github.event.inputs.max_wait_time || 1800 }}  # Default: 30 minutes
+          WAIT_INTERVAL=${{ github.event.inputs.poll_interval || 10 }}    # Default: 10 seconds
+          ELAPSED_TIME=0
+          
+          while [ $ELAPSED_TIME -lt $MAX_WAIT_TIME ]; do
+            # Get job status
+            STATUS_RESPONSE=$(curl -s "http://localhost:8080/discover/$JOB_ID")
+            JOB_STATUS=$(echo $STATUS_RESPONSE | jq -r '.status')
+            
+            echo "Current status: $JOB_STATUS (waited ${ELAPSED_TIME}s)"
+            
+            # Check if job is complete
+            if [ "$JOB_STATUS" == "completed" ] || [ "$JOB_STATUS" == "failed" ]; then
+              break
+            fi
+            
+            # Wait before checking again
+            sleep $WAIT_INTERVAL
+            ELAPSED_TIME=$((ELAPSED_TIME + WAIT_INTERVAL))
+          done
+          
+          if [ $ELAPSED_TIME -ge $MAX_WAIT_TIME ]; then
+            echo "Warning: Discovery job timed out after ${MAX_WAIT_TIME}s. Continuing with available data."
+          else
+            echo "Discovery job completed in ${ELAPSED_TIME}s."
+          fi
+          
+          # Get summary information
+          SUMMARY=$(echo $STATUS_RESPONSE | jq -r '.summary // empty')
+          if [ -n "$SUMMARY" ]; then
+            echo "Discovery summary:"
+            echo $SUMMARY | jq
+          fi
       
       # Export discovery data
       - name: Export discovery data
         run: |
+          JOB_ID="${{ steps.discovery.outputs.job_id }}"
+          echo "Exporting data for job $JOB_ID..."
+          
           # Export as JSON
-          curl -s "http://localhost:8080/discover/${{ steps.discovery.outputs.job_id }}/export?format=json" > discovery_exports/discovery_data.json
+          echo "Exporting JSON data..."
+          curl -s "http://localhost:8080/discover/$JOB_ID/export?format=json" > discovery_exports/discovery_data.json
+          
+          # Check if we got valid JSON
+          if ! jq empty discovery_exports/discovery_data.json 2>/dev/null; then
+            echo "Warning: Invalid or empty JSON data received"
+            cat discovery_exports/discovery_data.json
+          else
+            echo "JSON data exported successfully"
+            # Show device count
+            echo "Discovered devices: $(jq '.devices | length' discovery_exports/discovery_data.json)"
+          fi
           
           # Export device inventory
-          curl -s "http://localhost:8080/discover/${{ steps.discovery.outputs.job_id }}/export/device_inventory" > discovery_exports/device_inventory.csv
+          echo "Exporting device inventory..."
+          curl -s "http://localhost:8080/discover/$JOB_ID/export/device_inventory" > discovery_exports/device_inventory.csv
           
           # Export interface inventory
-          curl -s "http://localhost:8080/discover/${{ steps.discovery.outputs.job_id }}/export/interface_inventory" > discovery_exports/interface_inventory.csv
+          echo "Exporting interface inventory..."
+          curl -s "http://localhost:8080/discover/$JOB_ID/export/interface_inventory" > discovery_exports/interface_inventory.csv
           
           # Export topology visualization
-          curl -s "http://localhost:8080/discover/${{ steps.discovery.outputs.job_id }}/topology" > discovery_exports/topology.html
+          echo "Exporting topology visualization..."
+          curl -s "http://localhost:8080/discover/$JOB_ID/topology" > discovery_exports/topology.html
       
       # Upload artifacts
       - name: Upload discovery results
