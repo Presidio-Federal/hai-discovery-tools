@@ -55,21 +55,29 @@ This workflow runs a network discovery job using the container.
 | Input | Description |
 |-------|-------------|
 | `seed_devices` | Comma-separated list of devices to start discovery from (e.g., `192.168.1.1,10.0.0.1:22`) |
-| `credentials` | Comma-separated list of usernames for device authentication (e.g., `admin,cisco,operator`) |
+| `username` | Primary username for device authentication (e.g., `admin`) |
+| `use_multiple_credentials` | Whether to use multiple credential sets (`true` or `false`) |
+| `additional_usernames` | Additional usernames if multiple credentials are enabled (e.g., `cisco,operator`) |
 | `discovery_method` | Method to use for discovery (`neighbor_discovery` or `subnet_scan`) |
 | `max_depth` | Maximum discovery depth (default: 3) |
 | `timeout` | Connection timeout in seconds (default: 60) |
 
 ### Credentials Setup
 
-The workflow uses a dynamic credential system:
+The workflow uses a flexible credential system:
 
-1. You provide a comma-separated list of usernames in the `credentials` input
-2. The workflow looks for corresponding password secrets:
-   - `DEVICE_PASSWORD_1` for the first username
-   - `DEVICE_PASSWORD_2` for the second username
-   - And so on...
-3. If a specific password secret is not found, it falls back to `DEVICE_PASSWORD`
+1. **Single credential mode** (default):
+   - You provide a single username in the `username` input
+   - The workflow uses the `DEVICE_PASSWORD` secret for authentication
+
+2. **Multiple credentials mode** (when `use_multiple_credentials` is set to `true`):
+   - You provide a primary username in the `username` input (uses `DEVICE_PASSWORD`)
+   - You provide additional usernames in the `additional_usernames` input (comma-separated)
+   - The workflow looks for corresponding password secrets for additional usernames:
+     - `ALT_DEVICE_PASSWORD_1` for the first additional username
+     - `ALT_DEVICE_PASSWORD_2` for the second additional username
+     - And so on...
+   - If a specific password secret is not found, it falls back to `ALT_DEVICE_PASSWORD`
 
 ### Usage
 
@@ -78,7 +86,9 @@ The workflow uses a dynamic credential system:
 3. Click "Run workflow"
 4. Fill in the parameters:
    - Seed devices: `192.168.1.1,10.0.0.1:22,172.16.1.1:4446`
-   - Credentials: `admin,cisco,operator`
+   - Username: `admin`
+   - Use multiple credentials: `true` (if needed)
+   - Additional usernames: `cisco,operator` (if using multiple credentials)
    - Discovery method: `neighbor_discovery`
    - Max depth: `3`
    - Timeout: `60`
@@ -86,7 +96,7 @@ The workflow uses a dynamic credential system:
 
 ![GitHub Actions Workflow Input Form](https://i.imgur.com/example.png)
 
-This is where you enter the comma-separated list of usernames in the "Credentials" field.
+This is where you enter your username and, if needed, additional usernames for multiple credential sets.
 
 ### Results
 

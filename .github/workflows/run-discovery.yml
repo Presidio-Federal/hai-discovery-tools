@@ -67,37 +67,50 @@ jobs:
           # Convert comma-separated list to JSON array
           SEED_DEVICES=$(echo "${{ github.event.inputs.seed_devices }}" | sed 's/,/","/g' | sed 's/^/["/g' | sed 's/$/"]/')
           
-          # Prepare credentials from comma-separated list
-          IFS=',' read -r -a USERNAMES <<< "${{ github.event.inputs.credentials }}"
-          
-          # Get passwords from GitHub secrets
-          # Note: You need to create these secrets in your GitHub repository
-          # Format: DEVICE_PASSWORD_1, DEVICE_PASSWORD_2, DEVICE_PASSWORD_3, etc.
-          PASSWORDS=()
-          for i in "${!USERNAMES[@]}"; do
-            secret_name="DEVICE_PASSWORD_$((i+1))"
-            password_var="secrets.${secret_name}"
-            password="${!password_var}"
-            if [ -n "$password" ]; then
-              PASSWORDS+=("$password")
-            else
-              # Fallback to a generic password secret if specific one not found
-              PASSWORDS+=("${{ secrets.DEVICE_PASSWORD }}")
+          # Prepare credentials
+          if [ "${{ github.event.inputs.use_multiple_credentials }}" == "true" ]; then
+            # Start with primary username
+            USERNAMES=("${{ github.event.inputs.username }}")
+            
+            # Add additional usernames if provided
+            if [ -n "${{ github.event.inputs.additional_usernames }}" ]; then
+              IFS=',' read -r -a ADDITIONAL_USERNAMES <<< "${{ github.event.inputs.additional_usernames }}"
+              USERNAMES+=("${ADDITIONAL_USERNAMES[@]}")
             fi
-          done
-          
-          # Build credentials JSON array
-          CREDENTIALS="["
-          for i in "${!USERNAMES[@]}"; do
-            if [ $i -gt 0 ]; then
-              CREDENTIALS="${CREDENTIALS},"
-            fi
-            CREDENTIALS="${CREDENTIALS}{\"username\": \"${USERNAMES[$i]}\", \"password\": \"${PASSWORDS[$i]}\"}"
-          done
-          CREDENTIALS="${CREDENTIALS}]"
-          
-          # For debugging (don't log passwords)
-          echo "Using ${#USERNAMES[@]} credential sets"
+            
+            # Get passwords from GitHub secrets
+            # Format: DEVICE_PASSWORD for primary, ALT_DEVICE_PASSWORD_1, ALT_DEVICE_PASSWORD_2, etc. for additional
+            PASSWORDS=("${{ secrets.DEVICE_PASSWORD }}")
+            
+            for i in "${!ADDITIONAL_USERNAMES[@]}"; do
+              secret_name="ALT_DEVICE_PASSWORD_$((i+1))"
+              # Try to dynamically access the secret
+              password_var="secrets.${secret_name}"
+              password="${!password_var}"
+              if [ -n "$password" ]; then
+                PASSWORDS+=("$password")
+              else
+                # Fallback to a generic alt password secret if specific one not found
+                PASSWORDS+=("${{ secrets.ALT_DEVICE_PASSWORD }}")
+              fi
+            done
+            
+            # Build credentials JSON array
+            CREDENTIALS="["
+            for i in "${!USERNAMES[@]}"; do
+              if [ $i -gt 0 ]; then
+                CREDENTIALS="${CREDENTIALS},"
+              fi
+              CREDENTIALS="${CREDENTIALS}{\"username\": \"${USERNAMES[$i]}\", \"password\": \"${PASSWORDS[$i]}\"}"
+            done
+            CREDENTIALS="${CREDENTIALS}]"
+            
+            echo "Using ${#USERNAMES[@]} credential sets"
+          else
+            # Just use the primary username/password
+            CREDENTIALS="[{\"username\": \"${{ github.event.inputs.username }}\", \"password\": \"${{ secrets.DEVICE_PASSWORD }}\"}]"
+            echo "Using single credential set"
+          fi
           
           # Start discovery
           RESPONSE=$(curl -s -X POST "http://localhost:8080/discover" \
