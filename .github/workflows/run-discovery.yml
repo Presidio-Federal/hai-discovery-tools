@@ -64,9 +64,60 @@ jobs:
       # Start the discovery service
       - name: Start discovery service
         run: |
-          docker run -d --name discovery-service -p 8080:8080 ghcr.io/presidio-federal/hai-discovery-tools/discovery-service:latest
+          # Check if container already exists and remove it
+          if docker ps -a --format '{{.Names}}' | grep -q "^discovery-service$"; then
+            echo "Found existing discovery-service container, removing it..."
+            docker stop discovery-service || true
+            docker rm discovery-service || true
+          fi
+          
+          # Start the container
+          echo "Starting discovery service container..."
+          CONTAINER_ID=$(docker run -d --name discovery-service -p 8080:8080 ghcr.io/presidio-federal/hai-discovery-tools/discovery-service:latest)
+          
+          if [ -z "$CONTAINER_ID" ]; then
+            echo "Failed to start discovery service container"
+            exit 1
+          fi
+          
+          echo "Container started with ID: $CONTAINER_ID"
+          
           # Wait for service to start
-          sleep 5
+          echo "Waiting for service to start..."
+          MAX_RETRIES=30
+          RETRY_COUNT=0
+          
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            if curl -s http://localhost:8080/ > /dev/null; then
+              echo "Service is up and running"
+              break
+            fi
+            
+            echo "Waiting for service to start (attempt $((RETRY_COUNT+1))/$MAX_RETRIES)..."
+            sleep 2
+            RETRY_COUNT=$((RETRY_COUNT+1))
+          done
+          
+          if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+            echo "Service failed to start within the timeout period"
+            docker logs discovery-service
+            docker stop discovery-service || true
+            docker rm discovery-service || true
+            exit 1
+          fi
+          
+          # Verify container is running
+          if ! docker ps | grep -q discovery-service; then
+            echo "Container is not running. Checking logs:"
+            docker logs discovery-service
+            exit 1
+          fi
+      
+      # Install required tools
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl
       
       # Run discovery
       - name: Run discovery
@@ -122,6 +173,7 @@ jobs:
           
           # Start discovery - IMPORTANT: We're NOT using wait_for_results=true here
           # because we want to handle the waiting with proper polling
+          echo "Starting discovery job..."
           RESPONSE=$(curl -s -X POST "http://localhost:8080/discover" \
             -H "Content-Type: application/json" \
             -d "{
@@ -132,8 +184,22 @@ jobs:
               \"timeout\": ${{ github.event.inputs.timeout }}
             }")
           
-          # Extract job ID
-          JOB_ID=$(echo $RESPONSE | jq -r '.job_id')
+          echo "API response: $RESPONSE"
+          
+          # Check if jq is installed
+          if ! command -v jq &> /dev/null; then
+            echo "Error: jq is not installed. Using alternative method to extract job_id."
+            # Extract job_id using grep and sed as fallback
+            JOB_ID=$(echo $RESPONSE | grep -o '"job_id":"[^"]*"' | sed 's/"job_id":"//;s/"$//')
+            if [ -z "$JOB_ID" ]; then
+              echo "Failed to extract job_id from response. Exiting."
+              exit 1
+            fi
+          else
+            # Extract job ID using jq
+            JOB_ID=$(echo $RESPONSE | jq -r '.job_id')
+          fi
+          
           if [ -z "$JOB_ID" ] || [ "$JOB_ID" == "null" ]; then
             echo "Failed to get job ID from response:"
             echo $RESPONSE
@@ -155,7 +221,18 @@ jobs:
           while [ $ELAPSED_TIME -lt $MAX_WAIT_TIME ]; do
             # Get job status
             STATUS_RESPONSE=$(curl -s "http://localhost:8080/discover/$JOB_ID")
-            JOB_STATUS=$(echo $STATUS_RESPONSE | jq -r '.status')
+            
+            # Check if jq is installed
+            if ! command -v jq &> /dev/null; then
+              # Extract status using grep and sed as fallback
+              JOB_STATUS=$(echo $STATUS_RESPONSE | grep -o '"status":"[^"]*"' | sed 's/"status":"//;s/"$//')
+              if [ -z "$JOB_STATUS" ]; then
+                JOB_STATUS="unknown"
+              fi
+            else
+              # Extract job status using jq
+              JOB_STATUS=$(echo $STATUS_RESPONSE | jq -r '.status')
+            fi
             
             echo "Current status: $JOB_STATUS (waited ${ELAPSED_TIME}s)"
             
@@ -176,10 +253,14 @@ jobs:
           fi
           
           # Get summary information
-          SUMMARY=$(echo $STATUS_RESPONSE | jq -r '.summary // empty')
-          if [ -n "$SUMMARY" ]; then
-            echo "Discovery summary:"
-            echo $SUMMARY | jq
+          if command -v jq &> /dev/null; then
+            SUMMARY=$(echo $STATUS_RESPONSE | jq -r '.summary // empty')
+            if [ -n "$SUMMARY" ]; then
+              echo "Discovery summary:"
+              echo $SUMMARY | jq
+            fi
+          else
+            echo "Discovery completed, but jq not available to parse summary."
           fi
       
       # Export discovery data
@@ -190,29 +271,42 @@ jobs:
           
           # Export as JSON
           echo "Exporting JSON data..."
-          curl -s "http://localhost:8080/discover/$JOB_ID/export?format=json" > discovery_exports/discovery_data.json
+          curl -s --location --output discovery_exports/discovery_data.json "http://localhost:8080/discover/$JOB_ID/export?format=json"
           
-          # Check if we got valid JSON
-          if ! jq empty discovery_exports/discovery_data.json 2>/dev/null; then
-            echo "Warning: Invalid or empty JSON data received"
-            cat discovery_exports/discovery_data.json
+          # Check if file exists and has content
+          if [ ! -s discovery_exports/discovery_data.json ]; then
+            echo "Warning: Empty or missing JSON data file"
+            cat discovery_exports/discovery_data.json || echo "File not found"
           else
             echo "JSON data exported successfully"
-            # Show device count
-            echo "Discovered devices: $(jq '.devices | length' discovery_exports/discovery_data.json)"
+            # Show file size
+            ls -lh discovery_exports/discovery_data.json
+            
+            # Show device count if jq is available
+            if command -v jq &> /dev/null; then
+              echo "Discovered devices: $(jq '.devices | length' discovery_exports/discovery_data.json)"
+            fi
           fi
           
           # Export device inventory
           echo "Exporting device inventory..."
-          curl -s "http://localhost:8080/discover/$JOB_ID/export/device_inventory" > discovery_exports/device_inventory.csv
+          curl -s --location --output discovery_exports/device_inventory.csv "http://localhost:8080/discover/$JOB_ID/export/device_inventory"
           
           # Export interface inventory
           echo "Exporting interface inventory..."
-          curl -s "http://localhost:8080/discover/$JOB_ID/export/interface_inventory" > discovery_exports/interface_inventory.csv
+          curl -s --location --output discovery_exports/interface_inventory.csv "http://localhost:8080/discover/$JOB_ID/export/interface_inventory"
           
           # Export topology visualization
           echo "Exporting topology visualization..."
-          curl -s "http://localhost:8080/discover/$JOB_ID/topology" > discovery_exports/topology.html
+          curl -s --location --output discovery_exports/topology.html "http://localhost:8080/discover/$JOB_ID/topology"
+          
+          # Export device configurations as ZIP
+          echo "Exporting device configurations..."
+          curl -s --location --output discovery_exports/configs.zip "http://localhost:8080/discover/$JOB_ID/export?format=configs"
+          
+          # List all exported files
+          echo "Exported files:"
+          ls -lh discovery_exports/
       
       # Upload artifacts
       - name: Upload discovery results
@@ -221,3 +315,12 @@ jobs:
           name: discovery-results
           path: discovery_exports/
           retention-days: 7
+      
+      # Cleanup
+      - name: Cleanup containers
+        if: always()
+        run: |
+          echo "Cleaning up containers..."
+          docker stop discovery-service || true
+          docker rm discovery-service || true
+          echo "Cleanup complete"
