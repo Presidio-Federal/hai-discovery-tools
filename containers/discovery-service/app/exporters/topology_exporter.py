@@ -280,8 +280,8 @@ class TopologyExporter:
         for (const [ip, device] of Object.entries(data.devices)) {
             const hostname = device.hostname || ip;
             // Clean up hostname if it contains error message
-            const cleanHostname = hostname.startsWith('^') ? 
-                (device.platform || device.device_type || 'Unknown Device') : hostname;
+                const cleanHostname = hostname.startsWith('^') || hostname.includes('Invalid input') ? 
+                    (device.platform || device.device_type || 'Unknown Device') : hostname;
             const status = device.discovery_status || 'unknown';
             
             nodes.push({

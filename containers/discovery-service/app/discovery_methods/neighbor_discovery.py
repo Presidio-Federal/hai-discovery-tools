@@ -310,7 +310,9 @@ class NeighborDiscovery(DiscoveryMethodBase):
                         device.neighbors = neighbors
                         
                         # Add neighbors to queue if within depth limit
-                        if depth < self.config.max_depth:
+                        # We add 1 to max_depth to ensure we discover all neighbors even at the max depth
+                        # This way we get a complete topology even if we don't log in to all devices
+                        if depth < self.config.max_depth + 1:
                             for neighbor in neighbors:
                                 if "ip_address" in neighbor:
                                     neighbor_ip = neighbor["ip_address"]
@@ -319,10 +321,12 @@ class NeighborDiscovery(DiscoveryMethodBase):
                                     if neighbor_ip in self.visited_ips or self._should_exclude(neighbor_ip):
                                         continue
                                         
-                                    # Skip if this IP belongs to a device we've already discovered
+                                    # We don't want to skip neighbors that belong to already discovered devices
+                                    # Instead, we'll add connections between them in the topology
+                                    # This ensures we build a complete topology even if we've seen the device before
                                     if neighbor_ip in self.ip_to_hostname:
-                                        logger.info(f"Skipping neighbor {neighbor_ip} as it belongs to already discovered device {self.ip_to_hostname[neighbor_ip]}")
-                                        continue
+                                        logger.info(f"Neighbor {neighbor_ip} belongs to already discovered device {self.ip_to_hostname[neighbor_ip]}")
+                                        # We don't skip here, we'll add the connection in the topology
                                     
                                     logger.info(f"Adding neighbor {neighbor_ip} to queue at depth {depth + 1}")
                                     await self.queue.put((neighbor_ip, 22, depth + 1))  # Default to port 22 for neighbors
@@ -345,7 +349,7 @@ class NeighborDiscovery(DiscoveryMethodBase):
         logger.info(f"Completed processing device {ip_address}:{port} with status {device.discovery_status}")
         
         # Log progress
-        logger.info(f"Completed depth {depth}, found {len(self.visited_ips)} devices so far")
+        logger.info(f"Completed depth {depth}, found {len(self.visited_ips)} devices so far, max_depth is {self.config.max_depth}")
     
     def _should_exclude(self, ip_address: str) -> bool:
         """Check if an IP address should be excluded."""
@@ -393,9 +397,23 @@ class NeighborDiscovery(DiscoveryMethodBase):
                     neighbor_ip = neighbor["ip_address"]
                     neighbor_canonical_ip = canonical_ips.get(neighbor_ip, neighbor_ip)
                     
-                    # Only add if the neighbor is in our devices and not already added
-                    if neighbor_ip in self.result.devices and neighbor_canonical_ip not in topology[canonical_ip]:
+                    # Add all neighbors to the topology, even if they're not in our devices
+                    # This ensures we build a complete topology even if we couldn't connect to some devices
+                    if neighbor_canonical_ip not in topology[canonical_ip]:
                         topology[canonical_ip].append(neighbor_canonical_ip)
+                        
+                    # If the neighbor isn't in our devices yet, add a placeholder
+                    if neighbor_ip not in self.result.devices:
+                        # Create a placeholder device for the neighbor
+                        neighbor_device = Device(
+                            hostname=neighbor.get("hostname", neighbor_ip),
+                            ip_address=neighbor_ip,
+                            platform=neighbor.get("platform", "unknown"),
+                            device_type="unknown",
+                            discovery_status="pending"  # Mark as pending so we know it wasn't fully discovered
+                        )
+                        self.result.devices[neighbor_ip] = neighbor_device
+                        logger.info(f"Added placeholder device for neighbor {neighbor_ip}")
                     
                     # Add connection details
                     connection = {
