@@ -14,7 +14,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}/discovery-service
+  IMAGE_NAME: presidio-federal/hai-discovery-tools/discovery-service
 
 jobs:
   build-and-push:

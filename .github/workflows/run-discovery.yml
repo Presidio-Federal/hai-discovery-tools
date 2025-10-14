@@ -51,12 +51,12 @@ jobs:
       # Pull the discovery service container
       - name: Pull discovery service container
         run: |
-          docker pull ghcr.io/${{ github.repository }}/discovery-service:latest
+          docker pull ghcr.io/presidio-federal/hai-discovery-tools/discovery-service:latest
       
       # Start the discovery service
       - name: Start discovery service
         run: |
-          docker run -d --name discovery-service -p 8080:8080 ghcr.io/${{ github.repository }}/discovery-service:latest
+          docker run -d --name discovery-service -p 8080:8080 ghcr.io/presidio-federal/hai-discovery-tools/discovery-service:latest
           # Wait for service to start
           sleep 5
       

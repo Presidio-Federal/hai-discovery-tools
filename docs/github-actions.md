@@ -38,12 +38,12 @@ This workflow builds the discovery service container and pushes it to GitHub Con
 
 The container will be available at:
 ```
-ghcr.io/[your-username]/hai-discovery-tools/discovery-service:latest
+ghcr.io/presidio-federal/hai-discovery-tools/discovery-service:latest
 ```
 
 You can pull it with:
 ```bash
-docker pull ghcr.io/[your-username]/hai-discovery-tools/discovery-service:latest
+docker pull ghcr.io/presidio-federal/hai-discovery-tools/discovery-service:latest
 ```
 
 ## Network Discovery Workflow
@@ -122,7 +122,7 @@ jobs:
     steps:
       - name: Run network discovery
         run: |
-          docker run -d --name discovery -p 8080:8080 ghcr.io/[your-username]/hai-discovery-tools/discovery-service:latest
+          docker run -d --name discovery -p 8080:8080 ghcr.io/presidio-federal/hai-discovery-tools/discovery-service:latest
           
           # Wait for service to start
           sleep 5
