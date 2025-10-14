@@ -265,17 +265,21 @@ class DeviceHandler:
             
             # Get running config first - we'll use this for more reliable parsing
             config_cmd = self._get_command("config", device_type)
+            logger.info(f"Getting configuration from {ip_address}:{port} using command: {config_cmd}")
             config_output = await loop.run_in_executor(None, conn.send_command, config_cmd)
             
             # Get hostname from config
             hostname_match = re.search(r"hostname\s+(\S+)", config_output, re.IGNORECASE)
             if hostname_match:
                 device_info["hostname"] = hostname_match.group(1)
+                logger.info(f"Extracted hostname '{device_info['hostname']}' from config for {ip_address}:{port}")
             else:
                 # Fallback to hostname command
                 hostname_cmd = self._get_command("hostname", device_type)
+                logger.info(f"Getting hostname from {ip_address}:{port} using command: {hostname_cmd}")
                 hostname_output = await loop.run_in_executor(None, conn.send_command, hostname_cmd)
                 device_info["hostname"] = self._extract_hostname(hostname_output, device_type)
+                logger.info(f"Extracted hostname '{device_info['hostname']}' from command output for {ip_address}:{port}")
             
             # Get version information
             version_cmd = self._get_command("version", device_type)
@@ -288,13 +292,22 @@ class DeviceHandler:
             device_info["serial_number"] = self._extract_serial_info(version_output, device_type)
             
             # Parse interfaces from config
+            logger.info(f"Parsing interfaces from config for {ip_address}:{port}")
             device_info["interfaces"] = self._parse_interfaces_from_config(config_output, device_type)
+            logger.info(f"Found {len(device_info['interfaces'])} interfaces from config for {ip_address}:{port}")
             
             # If no interfaces found in config, try the show interfaces command
             if not device_info["interfaces"]:
+                logger.info(f"No interfaces found in config, trying show interfaces command for {ip_address}:{port}")
                 interfaces_cmd = self._get_command("interfaces", device_type)
                 interfaces_output = await loop.run_in_executor(None, conn.send_command, interfaces_cmd)
                 device_info["interfaces"] = self._parse_interfaces(interfaces_output, device_type)
+                logger.info(f"Found {len(device_info['interfaces'])} interfaces from command for {ip_address}:{port}")
+                
+            # Log interface details for debugging
+            for intf in device_info["interfaces"]:
+                if hasattr(intf, 'name') and hasattr(intf, 'ip_address'):
+                    logger.info(f"Interface {intf.name}: IP={intf.ip_address or 'None'}, Status={getattr(intf, 'status', 'Unknown')}")
             
             return device_info
             
@@ -571,8 +584,8 @@ class DeviceHandler:
         
         # For Cisco IOS/NXOS/XE
         if device_type in ["cisco_ios", "cisco_nxos", "cisco_xe"]:
-            # Extract interface sections from config
-            interface_pattern = r"interface ([^\n]+)[\r\n]+([^!]*?)(?=\n!|\Z)"
+            # Extract interface sections from config - improved pattern to better match Cisco configs
+            interface_pattern = r"^interface\s+([^\n]+)[\r\n]+((?:.+?(?:\n|$))+?)(?=^!|\Z)"
             interface_matches = re.finditer(interface_pattern, config, re.MULTILINE | re.DOTALL)
             
             for match in interface_matches:
@@ -582,12 +595,17 @@ class DeviceHandler:
                 # Create interface object
                 interface = DeviceInterface(name=name)
                 
-                # Extract IP address
+                # Extract IP address - handle both standard and DHCP formats
                 ip_match = re.search(r"ip address ([\d\.]+) ([\d\.]+)", config_section)
+                dhcp_match = re.search(r"ip address dhcp", config_section)
+                
                 if ip_match:
                     interface.ip_address = ip_match.group(1)
                     interface.subnet_mask = ip_match.group(2)
                     logger.info(f"Found IP address {interface.ip_address} for interface {name}")
+                elif dhcp_match:
+                    interface.ip_address = "DHCP"
+                    logger.info(f"Found DHCP configuration for interface {name}")
                 
                 # Extract description
                 desc_match = re.search(r"description (.+?)$", config_section, re.MULTILINE)
@@ -619,9 +637,9 @@ class DeviceHandler:
             
         # For Arista
         elif device_type == "arista_eos":
-            # Similar to Cisco
-            interface_pattern = r"^interface ([^\n]+)\n([^!]*)"
-            interface_matches = re.finditer(interface_pattern, config, re.MULTILINE)
+            # Similar to Cisco but with Arista-specific pattern
+            interface_pattern = r"^interface\s+([^\n]+)[\r\n]+((?:.+?(?:\n|$))+?)(?=^!|\Z)"
+            interface_matches = re.finditer(interface_pattern, config, re.MULTILINE | re.DOTALL)
             
             for match in interface_matches:
                 name = match.group(1).strip()
@@ -630,10 +648,25 @@ class DeviceHandler:
                 # Create interface object
                 interface = DeviceInterface(name=name)
                 
-                # Extract IP address
-                ip_match = re.search(r"ip address ([\d\.]+)/\d+", config_section)
+                # Extract IP address - handle both standard and CIDR formats
+                ip_match = re.search(r"ip address ([\d\.]+)/(\d+)", config_section)
+                standard_match = re.search(r"ip address ([\d\.]+) ([\d\.]+)", config_section)
+                dhcp_match = re.search(r"ip address dhcp", config_section)
+                
                 if ip_match:
                     interface.ip_address = ip_match.group(1)
+                    # Convert CIDR to subnet mask
+                    cidr = int(ip_match.group(2))
+                    mask_int = (0xffffffff << (32 - cidr)) & 0xffffffff
+                    interface.subnet_mask = f"{mask_int >> 24 & 0xff}.{mask_int >> 16 & 0xff}.{mask_int >> 8 & 0xff}.{mask_int & 0xff}"
+                    logger.info(f"Found IP address {interface.ip_address} with CIDR /{cidr} for interface {name}")
+                elif standard_match:
+                    interface.ip_address = standard_match.group(1)
+                    interface.subnet_mask = standard_match.group(2)
+                    logger.info(f"Found IP address {interface.ip_address} for interface {name}")
+                elif dhcp_match:
+                    interface.ip_address = "DHCP"
+                    logger.info(f"Found DHCP configuration for interface {name}")
                 
                 # Extract description
                 desc_match = re.search(r"description (.+?)$", config_section, re.MULTILINE)

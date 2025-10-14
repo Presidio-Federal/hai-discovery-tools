@@ -32,6 +32,8 @@ class NeighborDiscovery(DiscoveryMethodBase):
         self.visited_ips = set()
         self.queue = asyncio.Queue()
         self.semaphore = None  # Will be initialized in run()
+        self.hostname_to_ips = {}  # Map hostnames to IPs for deduplication
+        self.ip_to_hostname = {}  # Map IPs to hostnames for deduplication
         
     @property
     def name(self) -> str:
@@ -115,6 +117,12 @@ class NeighborDiscovery(DiscoveryMethodBase):
                 
                 # Skip if we've already visited this IP or reached max depth
                 if ip_address in self.visited_ips or depth > self.config.max_depth:
+                    self.queue.task_done()
+                    continue
+                    
+                # Check if this IP belongs to a device we've already discovered
+                if ip_address in self.ip_to_hostname:
+                    logger.info(f"Skipping {ip_address} as it belongs to already discovered device {self.ip_to_hostname[ip_address]}")
                     self.queue.task_done()
                     continue
                 
@@ -222,6 +230,35 @@ class NeighborDiscovery(DiscoveryMethodBase):
                         "port": str(port)  # Convert port to string to avoid serialization issues
                     }
                     
+                    # Handle device deduplication based on hostname
+                    if device.hostname and device.hostname not in ["", None]:
+                        # Clean up any error messages in hostname
+                        if device.hostname.startswith("^") or "Invalid input" in device.hostname:
+                            # Try to get hostname from parsed_config
+                            if device.parsed_config and "hostname" in device.parsed_config:
+                                device.hostname = device.parsed_config["hostname"]
+                        
+                        # If we have a valid hostname, track it for deduplication
+                        if device.hostname and not device.hostname.startswith("^") and "Invalid input" not in device.hostname:
+                            logger.info(f"Tracking device {device.hostname} with IP {ip_address} for deduplication")
+                            
+                            # Add this IP to the hostname's IP list
+                            if device.hostname not in self.hostname_to_ips:
+                                self.hostname_to_ips[device.hostname] = []
+                            self.hostname_to_ips[device.hostname].append(ip_address)
+                            
+                            # Map this IP to the hostname
+                            self.ip_to_hostname[ip_address] = device.hostname
+                            
+                            # Check if this device has other interfaces with IP addresses
+                            if device.interfaces:
+                                for intf in device.interfaces:
+                                    if isinstance(intf, dict) and intf.get("ip_address"):
+                                        intf_ip = intf.get("ip_address")
+                                        if intf_ip and intf_ip not in self.ip_to_hostname:
+                                            logger.info(f"Mapping interface IP {intf_ip} to device {device.hostname}")
+                                            self.ip_to_hostname[intf_ip] = device.hostname
+                    
                     # Extract device configuration
                     logger.info(f"Extracting configuration from {ip_address}:{port}")
                     config_result = await self.device_handler.get_device_config(
@@ -248,6 +285,11 @@ class NeighborDiscovery(DiscoveryMethodBase):
                                     
                                     # Skip if we've already visited this IP or it should be excluded
                                     if neighbor_ip in self.visited_ips or self._should_exclude(neighbor_ip):
+                                        continue
+                                        
+                                    # Skip if this IP belongs to a device we've already discovered
+                                    if neighbor_ip in self.ip_to_hostname:
+                                        logger.info(f"Skipping neighbor {neighbor_ip} as it belongs to already discovered device {self.ip_to_hostname[neighbor_ip]}")
                                         continue
                                     
                                     logger.info(f"Adding neighbor {neighbor_ip} to queue at depth {depth + 1}")
@@ -285,47 +327,89 @@ class NeighborDiscovery(DiscoveryMethodBase):
         topology = {}
         connections = []
         
-        # Create topology map
+        # Create a mapping of IPs to canonical IPs (primary IP for each hostname)
+        canonical_ips = {}
+        hostname_to_canonical_ip = {}
+        
+        # First pass: identify canonical IPs for each hostname
         for ip, device in self.result.devices.items():
             if device.discovery_status != "discovered":
                 continue
                 
-            # Initialize empty adjacency list
-            topology[ip] = []
+            hostname = device.hostname
+            if hostname and not hostname.startswith("^") and "Invalid input" not in hostname:
+                if hostname not in hostname_to_canonical_ip:
+                    hostname_to_canonical_ip[hostname] = ip
+                canonical_ips[ip] = hostname_to_canonical_ip[hostname]
+            else:
+                canonical_ips[ip] = ip  # Use itself as canonical if no hostname
+        
+        # Create topology map using canonical IPs
+        for ip, device in self.result.devices.items():
+            if device.discovery_status != "discovered":
+                continue
+                
+            canonical_ip = canonical_ips.get(ip, ip)
+            
+            # Initialize empty adjacency list if not already done
+            if canonical_ip not in topology:
+                topology[canonical_ip] = []
             
             # Add neighbors
             for neighbor in device.neighbors:
-                if "ip_address" in neighbor and neighbor["ip_address"] in self.result.devices:
+                if "ip_address" in neighbor:
                     neighbor_ip = neighbor["ip_address"]
-                    topology[ip].append(neighbor_ip)
+                    neighbor_canonical_ip = canonical_ips.get(neighbor_ip, neighbor_ip)
+                    
+                    # Only add if the neighbor is in our devices and not already added
+                    if neighbor_ip in self.result.devices and neighbor_canonical_ip not in topology[canonical_ip]:
+                        topology[canonical_ip].append(neighbor_canonical_ip)
                     
                     # Add connection details
                     connection = {
-                        "source": ip,
-                        "target": neighbor_ip,
+                        "source": canonical_ip,
+                        "target": neighbor_canonical_ip,
                         "source_port": neighbor.get("local_interface"),
                         "target_port": neighbor.get("remote_interface")
                     }
                     
-                    # Check if this connection already exists in reverse
-                    reverse_exists = False
+                    # Check if this connection already exists in any direction
+                    exists = False
                     for existing in connections:
-                        if (existing["source"] == neighbor_ip and 
-                            existing["target"] == ip and
-                            existing["source_port"] == neighbor.get("remote_interface") and
-                            existing["target_port"] == neighbor.get("local_interface")):
-                            reverse_exists = True
+                        if ((existing["source"] == connection["source"] and 
+                             existing["target"] == connection["target"] and
+                             existing["source_port"] == connection["source_port"] and
+                             existing["target_port"] == connection["target_port"]) or
+                            (existing["source"] == connection["target"] and 
+                             existing["target"] == connection["source"] and
+                             existing["source_port"] == connection["target_port"] and
+                             existing["target_port"] == connection["source_port"])):
+                            exists = True
                             break
                     
-                    if not reverse_exists:
+                    # Only add if the connection doesn't already exist
+                    if not exists:
                         connections.append(connection)
                         
                         # Update interface connection information
                         for device_interface in device.interfaces:
-                            if device_interface.name == neighbor.get("local_interface"):
-                                device_interface.connected_to = f"{neighbor.get('hostname', neighbor_ip)}:{neighbor.get('remote_interface')}"
-                                break
+                            if isinstance(device_interface, dict):
+                                if device_interface.get("name") == neighbor.get("local_interface"):
+                                    device_interface["connected_to"] = f"{neighbor.get('hostname', neighbor_ip)}:{neighbor.get('remote_interface')}"
+                                    break
+                            else:  # DeviceInterface object
+                                if device_interface.name == neighbor.get("local_interface"):
+                                    device_interface.connected_to = f"{neighbor.get('hostname', neighbor_ip)}:{neighbor.get('remote_interface')}"
+                                    break
         
+        # Store in result
         self.result.topology = topology
         self.result.connections = connections
+        
+        # Log deduplication results
+        logger.info(f"Device deduplication: {len(self.hostname_to_ips)} unique hostnames across {len(self.result.devices)} IP addresses")
+        for hostname, ips in self.hostname_to_ips.items():
+            if len(ips) > 1:
+                logger.info(f"Device {hostname} has multiple IPs: {', '.join(ips)}")
+                
         logger.info(f"Built topology map with {len(topology)} devices and {len(connections)} connections")
