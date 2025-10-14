@@ -202,6 +202,17 @@ class NeighborDiscovery(DiscoveryMethodBase):
                     for key, value in device_info.items():
                         if hasattr(device, key) and value is not None:
                             setattr(device, key, value)
+                            
+                    # Ensure interfaces are properly set
+                    if "interfaces" in device_info and device_info["interfaces"]:
+                        logger.info(f"Found {len(device_info['interfaces'])} interfaces for {ip_address}")
+                        try:
+                            device.interfaces = [intf.dict() for intf in device_info["interfaces"]]
+                            logger.info(f"Successfully set {len(device.interfaces)} interfaces for {ip_address}")
+                        except Exception as e:
+                            logger.error(f"Error converting interfaces to dict: {str(e)}")
+                            # Try direct assignment as fallback
+                            device.interfaces = device_info["interfaces"]
                     
                     # Update status
                     device.discovery_status = "discovered"

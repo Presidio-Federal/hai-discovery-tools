@@ -263,10 +263,19 @@ class DeviceHandler:
         try:
             loop = asyncio.get_event_loop()
             
-            # Get hostname
-            hostname_cmd = self._get_command("hostname", device_type)
-            hostname_output = await loop.run_in_executor(None, conn.send_command, hostname_cmd)
-            device_info["hostname"] = self._extract_hostname(hostname_output, device_type)
+            # Get running config first - we'll use this for more reliable parsing
+            config_cmd = self._get_command("config", device_type)
+            config_output = await loop.run_in_executor(None, conn.send_command, config_cmd)
+            
+            # Get hostname from config
+            hostname_match = re.search(r"hostname\s+(\S+)", config_output, re.IGNORECASE)
+            if hostname_match:
+                device_info["hostname"] = hostname_match.group(1)
+            else:
+                # Fallback to hostname command
+                hostname_cmd = self._get_command("hostname", device_type)
+                hostname_output = await loop.run_in_executor(None, conn.send_command, hostname_cmd)
+                device_info["hostname"] = self._extract_hostname(hostname_output, device_type)
             
             # Get version information
             version_cmd = self._get_command("version", device_type)
@@ -278,10 +287,14 @@ class DeviceHandler:
             device_info["model"] = self._extract_model_info(version_output, device_type)
             device_info["serial_number"] = self._extract_serial_info(version_output, device_type)
             
-            # Get interface information
-            interfaces_cmd = self._get_command("interfaces", device_type)
-            interfaces_output = await loop.run_in_executor(None, conn.send_command, interfaces_cmd)
-            device_info["interfaces"] = self._parse_interfaces(interfaces_output, device_type)
+            # Parse interfaces from config
+            device_info["interfaces"] = self._parse_interfaces_from_config(config_output, device_type)
+            
+            # If no interfaces found in config, try the show interfaces command
+            if not device_info["interfaces"]:
+                interfaces_cmd = self._get_command("interfaces", device_type)
+                interfaces_output = await loop.run_in_executor(None, conn.send_command, interfaces_cmd)
+                device_info["interfaces"] = self._parse_interfaces(interfaces_output, device_type)
             
             return device_info
             
@@ -316,18 +329,17 @@ class DeviceHandler:
             
             # Get running config
             config_cmd = self._get_command("config", device_type)
-            config = await loop.run_in_executor(None, conn.send_command, config_cmd)
+            config_output = await loop.run_in_executor(None, conn.send_command, config_cmd)
+            result["raw_config"] = config_output
             
-            result["raw_config"] = config
-            
-            # Parse configuration
-            if config:
-                result["parsed_config"] = ConfigParser.parse_config(config, device_type)
+            # Parse config using ConfigParser
+            config_parser = ConfigParser()
+            result["parsed_config"] = config_parser.parse(config_output, device_type)
             
             return result
             
         except Exception as e:
-            logger.error(f"Error getting config from {ip_address}: {str(e)}")
+            logger.error(f"Error getting device config for {ip_address}: {str(e)}")
             return result
             
         finally:
@@ -338,8 +350,9 @@ class DeviceHandler:
                 pass
     
     async def get_device_neighbors(self, ip_address: str, credential: Credential, 
-                                 protocols: List[str], device_type: Optional[str] = None, port: int = 22) -> List[Dict[str, Any]]:
-        """Get device neighbors using specified protocols."""
+                                 protocols: List[str], device_type: Optional[str] = None, 
+                                 port: int = 22) -> List[Dict[str, Any]]:
+        """Get device neighbors using CDP/LLDP."""
         neighbors = []
         
         # Connect to the device
@@ -352,45 +365,36 @@ class DeviceHandler:
         try:
             loop = asyncio.get_event_loop()
             
-            # Check for CDP neighbors
+            # Check CDP neighbors
             if "cdp" in protocols:
-                try:
-                    cdp_cmd = self._get_command("cdp_neighbors", device_type)
-                    logger.info(f"Running command on {ip_address}: {cdp_cmd}")
-                    cdp_output = await loop.run_in_executor(None, conn.send_command, cdp_cmd)
-                    
-                    if cdp_output:
-                        logger.debug(f"CDP output from {ip_address}: {cdp_output[:200]}...")
-                        cdp_neighbors = CDPParser.parse_cdp_output(cdp_output, device_type)
-                        logger.info(f"Found {len(cdp_neighbors)} CDP neighbors on {ip_address}")
-                        neighbors.extend(cdp_neighbors)
-                    else:
-                        logger.warning(f"No CDP output from {ip_address}")
-                except Exception as e:
-                    logger.error(f"Error getting CDP neighbors from {ip_address}: {str(e)}")
+                logger.info(f"Getting CDP neighbors for {ip_address}:{port}")
+                cdp_cmd = self._get_command("cdp_neighbors", device_type)
+                cdp_output = await loop.run_in_executor(None, conn.send_command, cdp_cmd)
+                
+                # Parse CDP output
+                cdp_parser = CDPParser()
+                cdp_neighbors = cdp_parser.parse_cdp_output(cdp_output, device_type)
+                if cdp_neighbors:
+                    neighbors.extend(cdp_neighbors)
+                    logger.info(f"Found {len(cdp_neighbors)} CDP neighbors for {ip_address}:{port}")
             
-            # Check for LLDP neighbors
+            # Check LLDP neighbors
             if "lldp" in protocols:
-                try:
-                    lldp_cmd = self._get_command("lldp_neighbors", device_type)
-                    logger.info(f"Running command on {ip_address}: {lldp_cmd}")
-                    lldp_output = await loop.run_in_executor(None, conn.send_command, lldp_cmd)
-                    
-                    if lldp_output:
-                        logger.debug(f"LLDP output from {ip_address}: {lldp_output[:200]}...")
-                        lldp_neighbors = LLDPParser.parse_lldp_output(lldp_output, device_type)
-                        logger.info(f"Found {len(lldp_neighbors)} LLDP neighbors on {ip_address}")
-                        neighbors.extend(lldp_neighbors)
-                    else:
-                        logger.warning(f"No LLDP output from {ip_address}")
-                except Exception as e:
-                    logger.error(f"Error getting LLDP neighbors from {ip_address}: {str(e)}")
+                logger.info(f"Getting LLDP neighbors for {ip_address}:{port}")
+                lldp_cmd = self._get_command("lldp_neighbors", device_type)
+                lldp_output = await loop.run_in_executor(None, conn.send_command, lldp_cmd)
+                
+                # Parse LLDP output
+                lldp_parser = LLDPParser()
+                lldp_neighbors = lldp_parser.parse(lldp_output, device_type)
+                if lldp_neighbors:
+                    neighbors.extend(lldp_neighbors)
+                    logger.info(f"Found {len(lldp_neighbors)} LLDP neighbors for {ip_address}:{port}")
             
-            logger.info(f"Total neighbors found for {ip_address}: {len(neighbors)}")
             return neighbors
             
         except Exception as e:
-            logger.error(f"Error discovering neighbors for {ip_address}: {str(e)}")
+            logger.error(f"Error getting device neighbors for {ip_address}: {str(e)}")
             return neighbors
             
         finally:
@@ -418,9 +422,17 @@ class DeviceHandler:
         if not output:
             return None
             
-        # For Cisco IOS/NXOS, hostname command returns just the hostname
-        if device_type in ["cisco_ios", "cisco_nxos", "arista_eos"]:
-            return output.strip()
+        # First try to extract from show running-config
+        if "hostname" in output.lower():
+            match = re.search(r"hostname\s+(\S+)", output, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        
+        # For Cisco IOS/NXOS, if not an error message
+        if device_type in ["cisco_ios", "cisco_nxos", "arista_eos", "cisco_xe"]:
+            # Check if the output is an error message
+            if not output.startswith("^") and not "% Invalid" in output:
+                return output.strip()
             
         # For Juniper
         if device_type == "juniper_junos":
@@ -433,7 +445,12 @@ class DeviceHandler:
         if match:
             return match.group(1)
             
-        return output.strip()
+        # If all else fails, check if the raw output is a valid hostname
+        clean_output = output.strip()
+        if clean_output and not clean_output.startswith("^") and not "% Invalid" in clean_output:
+            return clean_output
+            
+        return None
     
     def _extract_version_info(self, output: str, device_type: str) -> Optional[str]:
         """Extract OS version from show version output."""
@@ -543,6 +560,97 @@ class DeviceHandler:
             
         return None
     
+    def _parse_interfaces_from_config(self, config: str, device_type: str) -> List[DeviceInterface]:
+        """Parse interface information from running configuration."""
+        interfaces = []
+        
+        if not config:
+            return interfaces
+            
+        logger.info(f"Parsing interfaces from config for device type: {device_type}")
+        
+        # For Cisco IOS/NXOS/XE
+        if device_type in ["cisco_ios", "cisco_nxos", "cisco_xe"]:
+            # Extract interface sections from config
+            interface_pattern = r"interface ([^\n]+)[\r\n]+([^!]*?)(?=\n!|\Z)"
+            interface_matches = re.finditer(interface_pattern, config, re.MULTILINE | re.DOTALL)
+            
+            for match in interface_matches:
+                name = match.group(1).strip()
+                config_section = match.group(2).strip()
+                
+                # Create interface object
+                interface = DeviceInterface(name=name)
+                
+                # Extract IP address
+                ip_match = re.search(r"ip address ([\d\.]+) ([\d\.]+)", config_section)
+                if ip_match:
+                    interface.ip_address = ip_match.group(1)
+                    interface.subnet_mask = ip_match.group(2)
+                    logger.info(f"Found IP address {interface.ip_address} for interface {name}")
+                
+                # Extract description
+                desc_match = re.search(r"description (.+?)$", config_section, re.MULTILINE)
+                if desc_match:
+                    interface.description = desc_match.group(1).strip()
+                
+                # Extract status
+                if "shutdown" in config_section:
+                    interface.status = "down"
+                else:
+                    interface.status = "up"
+                
+                # Extract VLAN information
+                vlan_match = re.search(r"switchport access vlan (\d+)", config_section)
+                if vlan_match:
+                    interface.vlan = vlan_match.group(1)
+                    
+                # Check if trunk
+                if "switchport mode trunk" in config_section:
+                    interface.is_trunk = True
+                
+                logger.info(f"Adding interface {name} with status {interface.status}")
+                interfaces.append(interface)
+        
+        # For Juniper
+        elif device_type == "juniper_junos":
+            # TODO: Add Juniper config parsing
+            pass
+            
+        # For Arista
+        elif device_type == "arista_eos":
+            # Similar to Cisco
+            interface_pattern = r"^interface ([^\n]+)\n([^!]*)"
+            interface_matches = re.finditer(interface_pattern, config, re.MULTILINE)
+            
+            for match in interface_matches:
+                name = match.group(1).strip()
+                config_section = match.group(2).strip()
+                
+                # Create interface object
+                interface = DeviceInterface(name=name)
+                
+                # Extract IP address
+                ip_match = re.search(r"ip address ([\d\.]+)/\d+", config_section)
+                if ip_match:
+                    interface.ip_address = ip_match.group(1)
+                
+                # Extract description
+                desc_match = re.search(r"description (.+?)$", config_section, re.MULTILINE)
+                if desc_match:
+                    interface.description = desc_match.group(1).strip()
+                
+                # Extract status
+                if "shutdown" in config_section:
+                    interface.status = "down"
+                else:
+                    interface.status = "up"
+                
+                logger.info(f"Adding interface {name} with status {interface.status}")
+                interfaces.append(interface)
+        
+        return interfaces
+    
     def _parse_interfaces(self, output: str, device_type: str) -> List[DeviceInterface]:
         """Parse interface information from device output."""
         interfaces = []
@@ -551,9 +659,9 @@ class DeviceHandler:
             return interfaces
             
         # Different parsing based on device type
-        if device_type in ["cisco_ios", "cisco_nxos"]:
+        if device_type in ["cisco_ios", "cisco_nxos", "cisco_xe"]:
             # Split output by interface
-            interface_sections = re.split(r"(?=\w+Ethernet\d+\/\d+|\w+GigabitEthernet\d+\/\d+|\w+Serial\d+\/\d+)", output)
+            interface_sections = re.split(r"(?=\w+Ethernet\d+\/\d+|\w+GigabitEthernet\d+\/\d+|\w+Serial\d+\/\d+|Loopback\d+)", output)
             
             for section in interface_sections:
                 if not section.strip():
@@ -570,9 +678,9 @@ class DeviceHandler:
                 interface = DeviceInterface(name=name)
                 
                 # Extract IP address
-                ip_match = re.search(r"Internet address is ([\d\.]+\/\d+)", section)
+                ip_match = re.search(r"Internet address is ([\d\.]+)", section)
                 if ip_match:
-                    interface.ip_address = ip_match.group(1).split('/')[0]  # Remove CIDR notation
+                    interface.ip_address = ip_match.group(1)
                 
                 # Extract description
                 desc_match = re.search(r"Description: (.+)", section)
@@ -584,6 +692,7 @@ class DeviceHandler:
                 if status_match:
                     interface.status = status_match.group(1)
                 
+                logger.info(f"Adding interface {name} with status {interface.status}")
                 interfaces.append(interface)
                 
         elif device_type == "juniper_junos":
@@ -597,32 +706,29 @@ class DeviceHandler:
                 # Create interface object
                 interface = DeviceInterface(name=name)
                 
-                # Find the section for this interface
-                start_pos = match.start()
-                next_match = re.search(interface_pattern, output[start_pos + 1:])
-                end_pos = start_pos + 1 + next_match.start() if next_match else len(output)
-                section = output[start_pos:end_pos]
-                
+                # Extract status
+                status_section = output[match.end():output.find("Physical interface:", match.end())]
+                if "Enabled" in status_section:
+                    interface.status = "up"
+                else:
+                    interface.status = "down"
+                    
                 # Extract IP address
-                ip_match = re.search(r"Local: ([\d\.]+)", section)
+                ip_match = re.search(r"Local: ([\d\.]+)", status_section)
                 if ip_match:
                     interface.ip_address = ip_match.group(1)
-                
+                    
                 # Extract description
-                desc_match = re.search(r"Description: (.+)", section)
+                desc_match = re.search(r"Description: (.+?)\n", status_section)
                 if desc_match:
                     interface.description = desc_match.group(1).strip()
-                
-                # Extract status
-                status_match = re.search(r", (Physical|Administratively) (up|down)", section)
-                if status_match:
-                    interface.status = status_match.group(2)
-                
+                    
+                logger.info(f"Adding interface {name} with status {interface.status}")
                 interfaces.append(interface)
                 
         elif device_type == "arista_eos":
-            # Arista interface pattern (similar to Cisco)
-            interface_sections = re.split(r"(?=\w+thernet\d+\/\d+)", output)
+            # Arista interface pattern
+            interface_sections = re.split(r"(?=\w+Ethernet\d+\/\d+|Management\d+)", output)
             
             for section in interface_sections:
                 if not section.strip():
@@ -644,129 +750,16 @@ class DeviceHandler:
                     interface.ip_address = ip_match.group(1)
                 
                 # Extract description
-                desc_match = re.search(r"Description: (.+)", section)
+                desc_match = re.search(r"Description: (.+?)\n", section)
                 if desc_match:
                     interface.description = desc_match.group(1).strip()
                 
                 # Extract status
-                status_match = re.search(r"line protocol is (\w+)", section)
+                status_match = re.search(r"is (\w+), line protocol is (\w+)", section)
                 if status_match:
-                    interface.status = status_match.group(1)
+                    interface.status = status_match.group(2)  # Use line protocol status
                 
+                logger.info(f"Adding interface {name} with status {interface.status}")
                 interfaces.append(interface)
         
         return interfaces
-    
-    def _parse_cdp_neighbors(self, output: str, device_type: str) -> List[Dict[str, Any]]:
-        """Parse CDP neighbor output."""
-        neighbors = []
-        
-        if not output:
-            return neighbors
-            
-        # CDP parsing is similar across Cisco and Arista devices
-        device_sections = re.split(r"-{4,}", output)
-        
-        for section in device_sections:
-            if not section.strip():
-                continue
-                
-            neighbor = {}
-            
-            # Extract hostname
-            hostname_match = re.search(r"Device ID:[\s]*([\w\.-]+)", section)
-            if hostname_match:
-                neighbor["hostname"] = hostname_match.group(1)
-                
-            # Extract IP address
-            ip_match = re.search(r"IP address:[\s]*([\d\.]+)", section)
-            if ip_match:
-                neighbor["ip_address"] = ip_match.group(1)
-                
-            # Extract platform/model
-            platform_match = re.search(r"Platform:[\s]*([^,]+),", section)
-            if platform_match:
-                neighbor["platform"] = platform_match.group(1).strip()
-                
-            # Extract interface information
-            local_int_match = re.search(r"Interface:[\s]*([^,]+),", section)
-            remote_int_match = re.search(r"Port ID \(outgoing port\):[\s]*(.+)", section)
-            
-            if local_int_match:
-                neighbor["local_interface"] = local_int_match.group(1).strip()
-            
-            if remote_int_match:
-                neighbor["remote_interface"] = remote_int_match.group(1).strip()
-                
-            if neighbor.get("hostname") and neighbor.get("ip_address"):
-                neighbors.append(neighbor)
-                
-        return neighbors
-    
-    def _parse_lldp_neighbors(self, output: str, device_type: str) -> List[Dict[str, Any]]:
-        """Parse LLDP neighbor output."""
-        neighbors = []
-        
-        if not output:
-            return neighbors
-            
-        # Different parsing based on device type
-        if device_type in ["cisco_ios", "cisco_nxos", "arista_eos"]:
-            # Simple regex-based parsing for LLDP output
-            device_sections = re.split(r"-{4,}|={4,}", output)
-            
-            for section in device_sections:
-                if not section.strip():
-                    continue
-                    
-                neighbor = {}
-                
-                # Extract hostname
-                hostname_match = re.search(r"System Name:[\s]*([\w\.-]+)", section)
-                if hostname_match:
-                    neighbor["hostname"] = hostname_match.group(1)
-                    
-                # Extract IP address
-                ip_match = re.search(r"Management Address:[\s]*([\d\.]+)", section)
-                if ip_match:
-                    neighbor["ip_address"] = ip_match.group(1)
-                    
-                # Extract platform/model
-                platform_match = re.search(r"System Description:[\s]*([^\n]+)", section)
-                if platform_match:
-                    neighbor["platform"] = platform_match.group(1).strip()
-                    
-                # Extract interface information
-                local_int_match = re.search(r"Local Interface:[\s]*([^\n]+)", section)
-                remote_int_match = re.search(r"Port id:[\s]*([^\n]+)", section)
-                
-                if local_int_match:
-                    neighbor["local_interface"] = local_int_match.group(1).strip()
-                
-                if remote_int_match:
-                    neighbor["remote_interface"] = remote_int_match.group(1).strip()
-                    
-                if neighbor.get("hostname") and neighbor.get("ip_address"):
-                    neighbors.append(neighbor)
-                    
-        elif device_type == "juniper_junos":
-            # Parse the basic LLDP neighbor table
-            lines = output.strip().split('\n')
-            for line in lines:
-                if "Local Interface" in line or "Parent Interface" in line or not line.strip():
-                    continue
-                    
-                parts = line.split()
-                if len(parts) >= 4:
-                    neighbor = {
-                        "local_interface": parts[0],
-                        "remote_interface": parts[1],
-                        "hostname": parts[2]
-                    }
-                    
-                    # Try to find IP address in other parts of output
-                    # This is a simplification; in a real implementation,
-                    # you would need to get detailed info for each neighbor
-                    neighbors.append(neighbor)
-                
-        return neighbors

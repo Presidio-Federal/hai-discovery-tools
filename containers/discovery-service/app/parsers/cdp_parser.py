@@ -27,13 +27,16 @@ class CDPParser:
             A list of dictionaries containing neighbor information
         """
         if not output:
+            logger.warning("No CDP output to parse")
             return []
             
         neighbors = []
+        logger.info(f"Parsing CDP output for device type: {device_type}")
         
         if device_type.startswith("cisco"):
             # Split output by device sections
             device_sections = re.split(r"-{4,}", output)
+            logger.info(f"Found {len(device_sections)} CDP sections to parse")
             
             for section in device_sections:
                 if not section.strip():
@@ -98,10 +101,12 @@ class CDPParser:
                     neighbor["duplex"] = duplex_match.group(1)
                     
                 if neighbor.get("hostname") and neighbor.get("ip_address"):
+                    logger.info(f"Adding CDP neighbor: {neighbor['hostname']} ({neighbor['ip_address']})")
                     neighbors.append(neighbor)
                     
         elif device_type == "arista_eos":
             # Arista CDP output format (similar to Cisco)
             return CDPParser.parse_cdp_output(output, "cisco_ios")
                 
+        logger.info(f"Parsed {len(neighbors)} CDP neighbors")
         return neighbors
