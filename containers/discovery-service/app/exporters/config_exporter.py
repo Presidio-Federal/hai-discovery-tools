@@ -132,12 +132,49 @@ class ConfigExporter:
                 
                 # Write device information
                 for ip, device in devices.items():
+                    # Clean up hostname if it contains error message
                     hostname = device.get("hostname", "")
+                    if hostname and hostname.startswith("^"):
+                        hostname = ""
+                        
+                    # Get device information from various sources
                     platform = device.get("platform", "")
                     os_version = device.get("os_version", "")
+                    
+                    # Try to get model from device_info or parsed_config
                     model = device.get("model", "")
+                    if not model and "parsed_config" in device:
+                        # Try to extract model from parsed config
+                        parsed_config = device.get("parsed_config", {})
+                        if isinstance(parsed_config, dict):
+                            # Check inventory section if it exists
+                            if "inventory" in parsed_config and isinstance(parsed_config["inventory"], list):
+                                for item in parsed_config["inventory"]:
+                                    if item.get("name", "").lower() == "chassis":
+                                        model = item.get("pid", "")
+                                        break
+                    
+                    # Try to get serial number from device_info or parsed_config
                     serial = device.get("serial_number", "")
+                    if not serial and "parsed_config" in device:
+                        # Try to extract serial from parsed config
+                        parsed_config = device.get("parsed_config", {})
+                        if isinstance(parsed_config, dict):
+                            # Check inventory section if it exists
+                            if "inventory" in parsed_config and isinstance(parsed_config["inventory"], list):
+                                for item in parsed_config["inventory"]:
+                                    if item.get("name", "").lower() == "chassis":
+                                        serial = item.get("sn", "")
+                                        break
+                    
                     status = device.get("discovery_status", "")
+                    
+                    # Escape any commas in fields
+                    hostname = hostname.replace(",", "_")
+                    platform = platform.replace(",", "_")
+                    os_version = os_version.replace(",", "_")
+                    model = model.replace(",", "_")
+                    serial = serial.replace(",", "_")
                     
                     f.write(f"{ip},{hostname},{platform},{os_version},{model},{serial},{status}\n")
                     
@@ -178,15 +215,49 @@ class ConfigExporter:
                 
                 # Write interface information
                 for ip, device in devices.items():
+                    # Clean up hostname if it contains error message
                     hostname = device.get("hostname", "")
+                    if hostname and hostname.startswith("^"):
+                        hostname = ""
                     
-                    for interface in device.get("interfaces", []):
+                    # Try to get interfaces from device or from parsed_config
+                    interfaces = device.get("interfaces", [])
+                    
+                    # If no interfaces found, try to extract from parsed_config
+                    if not interfaces and "parsed_config" in device:
+                        parsed_config = device.get("parsed_config", {})
+                        if isinstance(parsed_config, dict) and "interfaces" in parsed_config:
+                            parsed_interfaces = parsed_config.get("interfaces", [])
+                            if isinstance(parsed_interfaces, list):
+                                # Convert parsed interfaces to the expected format
+                                for intf in parsed_interfaces:
+                                    interfaces.append({
+                                        "name": intf.get("name", ""),
+                                        "ip_address": intf.get("ip_address", ""),
+                                        "description": intf.get("description", ""),
+                                        "status": "up" if not intf.get("shutdown", True) else "down",
+                                        "vlan": intf.get("vlan", ""),
+                                    })
+                    
+                    # Add connection information from neighbors
+                    neighbor_connections = {}
+                    for neighbor in device.get("neighbors", []):
+                        local_intf = neighbor.get("local_interface", "")
+                        remote_host = neighbor.get("hostname", "")
+                        remote_intf = neighbor.get("remote_interface", "")
+                        if local_intf and remote_host:
+                            neighbor_connections[local_intf] = f"{remote_host} ({remote_intf})"
+                    
+                    # Write each interface
+                    for interface in interfaces:
                         name = interface.get("name", "")
                         intf_ip = interface.get("ip_address", "")
                         description = interface.get("description", "").replace(",", " ")
                         status = interface.get("status", "")
                         vlan = interface.get("vlan", "")
-                        connected_to = interface.get("connected_to", "")
+                        
+                        # Get connected_to from neighbor connections
+                        connected_to = neighbor_connections.get(name, interface.get("connected_to", ""))
                         
                         f.write(f"{ip},{hostname},{name},{intf_ip},{description},{status},{vlan},{connected_to}\n")
                     
