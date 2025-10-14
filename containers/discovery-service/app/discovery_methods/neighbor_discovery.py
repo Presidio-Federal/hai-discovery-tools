@@ -34,6 +34,7 @@ class NeighborDiscovery(DiscoveryMethodBase):
         self.semaphore = None  # Will be initialized in run()
         self.hostname_to_ips = {}  # Map hostnames to IPs for deduplication
         self.ip_to_hostname = {}  # Map IPs to hostnames for deduplication
+        self.unique_devices = {}  # Store unique devices by hostname
         
     @property
     def name(self) -> str:
@@ -122,7 +123,14 @@ class NeighborDiscovery(DiscoveryMethodBase):
                     
                 # Check if this IP belongs to a device we've already discovered
                 if ip_address in self.ip_to_hostname:
-                    logger.info(f"Skipping {ip_address} as it belongs to already discovered device {self.ip_to_hostname[ip_address]}")
+                    hostname = self.ip_to_hostname[ip_address]
+                    logger.info(f"Skipping {ip_address} as it belongs to already discovered device {hostname}")
+                    
+                    # Add this IP to the existing device's record
+                    if hostname in self.unique_devices:
+                        self.unique_devices[hostname]["ip_addresses"].append(ip_address)
+                        logger.info(f"Added {ip_address} to existing device {hostname}")
+                    
                     self.queue.task_done()
                     continue
                 
@@ -250,14 +258,38 @@ class NeighborDiscovery(DiscoveryMethodBase):
                             # Map this IP to the hostname
                             self.ip_to_hostname[ip_address] = device.hostname
                             
+                            # Initialize the all_ip_addresses list if it doesn't exist
+                            if not hasattr(device, 'all_ip_addresses') or not device.all_ip_addresses:
+                                device.all_ip_addresses = [ip_address]
+                            elif ip_address not in device.all_ip_addresses:
+                                device.all_ip_addresses.append(ip_address)
+                                
                             # Check if this device has other interfaces with IP addresses
                             if device.interfaces:
                                 for intf in device.interfaces:
                                     if isinstance(intf, dict) and intf.get("ip_address"):
                                         intf_ip = intf.get("ip_address")
-                                        if intf_ip and intf_ip not in self.ip_to_hostname:
+                                        # Skip DHCP interfaces
+                                        if intf_ip and intf_ip != "dhcp" and intf_ip not in self.ip_to_hostname:
                                             logger.info(f"Mapping interface IP {intf_ip} to device {device.hostname}")
                                             self.ip_to_hostname[intf_ip] = device.hostname
+                                            
+                                            # Add to the device's all_ip_addresses list
+                                            if intf_ip not in device.all_ip_addresses:
+                                                device.all_ip_addresses.append(intf_ip)
+                                                
+                                        # Also check for secondary IPs
+                                        if isinstance(intf, dict) and intf.get("secondary_ips"):
+                                            for sec_ip in intf.get("secondary_ips", []):
+                                                if isinstance(sec_ip, dict) and sec_ip.get("ip"):
+                                                    sec_ip_addr = sec_ip.get("ip")
+                                                    if sec_ip_addr and sec_ip_addr not in self.ip_to_hostname:
+                                                        logger.info(f"Mapping secondary IP {sec_ip_addr} to device {device.hostname}")
+                                                        self.ip_to_hostname[sec_ip_addr] = device.hostname
+                                                        
+                                                        # Add to the device's all_ip_addresses list
+                                                        if sec_ip_addr not in device.all_ip_addresses:
+                                                            device.all_ip_addresses.append(sec_ip_addr)
                     
                     # Extract device configuration
                     logger.info(f"Extracting configuration from {ip_address}:{port}")
@@ -369,8 +401,8 @@ class NeighborDiscovery(DiscoveryMethodBase):
                     connection = {
                         "source": canonical_ip,
                         "target": neighbor_canonical_ip,
-                        "source_port": neighbor.get("local_interface"),
-                        "target_port": neighbor.get("remote_interface")
+                        "source_port": neighbor.get("local_interface", ""),
+                        "target_port": neighbor.get("remote_interface", "")
                     }
                     
                     # Check if this connection already exists in any direction

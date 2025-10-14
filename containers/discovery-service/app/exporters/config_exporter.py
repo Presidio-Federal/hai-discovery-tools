@@ -134,8 +134,13 @@ class ConfigExporter:
                 for ip, device in devices.items():
                     # Clean up hostname if it contains error message
                     hostname = device.get("hostname", "")
-                    if hostname and hostname.startswith("^"):
-                        hostname = ""
+                    if hostname and (hostname.startswith("^") or "Invalid input" in hostname):
+                        # Try to get hostname from parsed_config
+                        parsed_config = device.get("parsed_config", {})
+                        if isinstance(parsed_config, dict) and "hostname" in parsed_config:
+                            hostname = parsed_config["hostname"]
+                        else:
+                            hostname = ""
                         
                     # Get device information from various sources
                     platform = device.get("platform", "")
@@ -217,8 +222,13 @@ class ConfigExporter:
                 for ip, device in devices.items():
                     # Clean up hostname if it contains error message
                     hostname = device.get("hostname", "")
-                    if hostname and hostname.startswith("^"):
-                        hostname = ""
+                    if hostname and (hostname.startswith("^") or "Invalid input" in hostname):
+                        # Try to get hostname from parsed_config
+                        parsed_config = device.get("parsed_config", {})
+                        if isinstance(parsed_config, dict) and "hostname" in parsed_config:
+                            hostname = parsed_config["hostname"]
+                        else:
+                            hostname = ""
                     
                     # Try to get interfaces from device or from parsed_config
                     interfaces = device.get("interfaces", [])

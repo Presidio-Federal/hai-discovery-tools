@@ -586,7 +586,12 @@ class DeviceHandler:
         if device_type in ["cisco_ios", "cisco_nxos", "cisco_xe"]:
             # Extract interface sections from config - improved pattern to better match Cisco configs
             interface_pattern = r"^interface\s+([^\n]+)[\r\n]+((?:.+?(?:\n|$))+?)(?=^!|\Z)"
-            interface_matches = re.finditer(interface_pattern, config, re.MULTILINE | re.DOTALL)
+            try:
+                interface_matches = list(re.finditer(interface_pattern, config, re.MULTILINE | re.DOTALL))
+                logger.info(f"Found {len(interface_matches)} interface sections in config")
+            except Exception as e:
+                logger.error(f"Error in regex pattern: {str(e)}")
+                interface_matches = []
             
             for match in interface_matches:
                 name = match.group(1).strip()
@@ -598,14 +603,26 @@ class DeviceHandler:
                 # Extract IP address - handle both standard and DHCP formats
                 ip_match = re.search(r"ip address ([\d\.]+) ([\d\.]+)", config_section)
                 dhcp_match = re.search(r"ip address dhcp", config_section)
+                secondary_ip_matches = re.finditer(r"ip address ([\d\.]+) ([\d\.]+) secondary", config_section)
                 
                 if ip_match:
                     interface.ip_address = ip_match.group(1)
                     interface.subnet_mask = ip_match.group(2)
                     logger.info(f"Found IP address {interface.ip_address} for interface {name}")
+                    
+                    # Store secondary IPs in a list
+                    secondary_ips = []
+                    for sec_match in secondary_ip_matches:
+                        secondary_ips.append({
+                            "ip": sec_match.group(1),
+                            "mask": sec_match.group(2)
+                        })
+                    if secondary_ips:
+                        interface.secondary_ips = secondary_ips
+                        logger.info(f"Found {len(secondary_ips)} secondary IPs for interface {name}")
                 elif dhcp_match:
-                    interface.ip_address = "DHCP"
-                    logger.info(f"Found DHCP configuration for interface {name}")
+                    interface.ip_address = "dhcp"
+                    logger.info(f"Interface {name} is using DHCP")
                 
                 # Extract description
                 desc_match = re.search(r"description (.+?)$", config_section, re.MULTILINE)

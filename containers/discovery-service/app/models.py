@@ -19,11 +19,14 @@ class DeviceInterface(BaseModel):
     """Network interface on a device."""
     name: str
     ip_address: Optional[str] = None
+    subnet_mask: Optional[str] = None
     mac_address: Optional[str] = None
     description: Optional[str] = None
     status: Optional[str] = None
     vlan: Optional[str] = None
     connected_to: Optional[str] = None
+    is_trunk: bool = False
+    secondary_ips: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class Device(BaseModel):
@@ -37,7 +40,7 @@ class Device(BaseModel):
     uptime: Optional[str] = None
     vendor: Optional[str] = None
     device_type: Optional[str] = None
-    interfaces: List[DeviceInterface] = Field(default_factory=list)
+    interfaces: List[Any] = Field(default_factory=list)  # Can be DeviceInterface or dict
     neighbors: List[Dict[str, Any]] = Field(default_factory=list)
     config: Optional[str] = None
     parsed_config: Optional[Dict[str, Any]] = None
@@ -45,6 +48,7 @@ class Device(BaseModel):
     discovery_status: str = "pending"  # pending, discovered, failed, unreachable
     discovery_error: Optional[str] = None
     last_seen: datetime = Field(default_factory=datetime.now)
+    all_ip_addresses: List[str] = Field(default_factory=list)  # All IPs associated with this device
 
 
 class DiscoveryConfig(BaseModel):
