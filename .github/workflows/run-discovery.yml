@@ -7,10 +7,22 @@ on:
         description: 'Comma-separated list of seed devices (IP:PORT)'
         required: true
         default: '192.168.1.1,10.0.0.1:22,172.16.1.1:4446'
-      credentials:
-        description: 'Comma-separated list of usernames (matching number of passwords in secrets)'
+      username:
+        description: 'Primary username for device authentication'
         required: true
-        default: 'admin,cisco,operator'
+        default: 'admin'
+      use_multiple_credentials:
+        description: 'Use multiple credential sets'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      additional_usernames:
+        description: 'Additional usernames (comma-separated, if multiple credentials enabled)'
+        required: false
+        default: 'cisco,operator'
       discovery_method:
         description: 'Discovery method to use'
         required: true
