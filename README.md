@@ -117,6 +117,8 @@ The Discovery Service provides a RESTful API for network discovery operations.
 
 For detailed API documentation, see the [API Documentation](docs/api.md).
 
+For GitHub Actions integration, see the [GitHub Actions Guide](docs/github-actions.md).
+
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
