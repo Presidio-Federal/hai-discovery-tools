@@ -441,16 +441,19 @@ class NeighborDiscovery(DiscoveryMethodBase):
                     if not exists:
                         connections.append(connection)
                         
-                        # Update interface connection information
+                    # Update interface connection information
+                    if device.interfaces:
                         for device_interface in device.interfaces:
+                            # Handle both dict and object interfaces
                             if isinstance(device_interface, dict):
                                 if device_interface.get("name") == neighbor.get("local_interface"):
                                     device_interface["connected_to"] = f"{neighbor.get('hostname', neighbor_ip)}:{neighbor.get('remote_interface')}"
+                                    logger.info(f"Updated interface connection: {device_interface.get('name')} -> {device_interface.get('connected_to')}")
                                     break
-                            else:  # DeviceInterface object
-                                if device_interface.name == neighbor.get("local_interface"):
-                                    device_interface.connected_to = f"{neighbor.get('hostname', neighbor_ip)}:{neighbor.get('remote_interface')}"
-                                    break
+                            elif hasattr(device_interface, 'name') and device_interface.name == neighbor.get("local_interface"):
+                                device_interface.connected_to = f"{neighbor.get('hostname', neighbor_ip)}:{neighbor.get('remote_interface')}"
+                                logger.info(f"Updated interface connection: {device_interface.name} -> {device_interface.connected_to}")
+                                break
         
         # Store in result
         self.result.topology = topology

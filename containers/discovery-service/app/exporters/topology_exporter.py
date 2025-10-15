@@ -331,10 +331,12 @@ class TopologyExporter:
             
         // Initialize force simulation with stronger forces to ensure visibility
         const simulation = d3.forceSimulation(nodes)
-            .force("link", d3.forceLink(links).id(d => d.id).distance(150))
-            .force("charge", d3.forceManyBody().strength(-800))
+            .force("link", d3.forceLink(links).id(d => d.id).distance(100))
+            .force("charge", d3.forceManyBody().strength(-400))
+            .force("collide", d3.forceCollide().radius(50).strength(1))
             .force("center", d3.forceCenter(width / 2, height / 2))
             .alphaDecay(0.01) // Slower cooling for better layout
+            .alpha(1).restart() // Restart with high energy
         
         const svg = d3.select("#topology")
             .append("svg")

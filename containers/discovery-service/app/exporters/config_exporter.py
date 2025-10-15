@@ -258,13 +258,29 @@ class ConfigExporter:
                         if local_intf and remote_host:
                             neighbor_connections[local_intf] = f"{remote_host} ({remote_intf})"
                     
+                    # Debug log the number of interfaces
+                    logger.info(f"Device {ip} ({hostname}) has {len(interfaces)} interfaces to export")
+                    
                     # Write each interface
                     for interface in interfaces:
-                        name = interface.get("name", "")
-                        intf_ip = interface.get("ip_address", "")
-                        description = interface.get("description", "").replace(",", " ")
-                        status = interface.get("status", "")
-                        vlan = interface.get("vlan", "")
+                        # Debug log the interface details
+                        logger.info(f"Processing interface: {interface}")
+                        
+                        # Handle both dictionary and object interfaces
+                        if hasattr(interface, 'name'):
+                            # It's an object
+                            name = interface.name
+                            intf_ip = interface.ip_address if hasattr(interface, 'ip_address') else ""
+                            description = (interface.description or "").replace(",", " ") if hasattr(interface, 'description') else ""
+                            status = interface.status if hasattr(interface, 'status') else ""
+                            vlan = interface.vlan if hasattr(interface, 'vlan') else ""
+                        else:
+                            # It's a dictionary
+                            name = interface.get("name", "")
+                            intf_ip = interface.get("ip_address", "")
+                            description = interface.get("description", "").replace(",", " ")
+                            status = interface.get("status", "")
+                            vlan = interface.get("vlan", "")
                         
                         # Get connected_to from neighbor connections
                         connected_to = neighbor_connections.get(name, interface.get("connected_to", ""))
