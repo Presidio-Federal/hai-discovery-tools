@@ -1,5 +1,12 @@
 name: Network Discovery
 
+env:
+  # Default values for discovery parameters
+  TIMEOUT: 60
+  MAX_WAIT_TIME: 1800
+  POLL_INTERVAL: 10
+  CONCURRENCY: 200
+
 on:
   workflow_dispatch:
     inputs:
@@ -23,30 +30,36 @@ on:
         description: 'Additional usernames (comma-separated, if multiple credentials enabled)'
         required: false
         default: 'cisco,operator'
-      discovery_method:
-        description: 'Discovery method to use'
+      discovery_mode:
+        description: 'Discovery mode to use'
         required: true
-        default: 'neighbor_discovery'
+        default: 'full-pipeline'
         type: choice
         options:
+          - full-pipeline
+          - seed-device
+          - subnet
+      discovery_method:
+        description: 'Discovery method to use (auto will select based on mode)'
+        required: false
+        default: 'auto'
+        type: choice
+        options:
+          - auto
           - neighbor_discovery
           - subnet_scan
+          - ip_reachability
       max_depth:
         description: 'Maximum discovery depth'
         required: false
         default: '3'
-      timeout:
-        description: 'Connection timeout in seconds'
+      job_id:
+        description: 'Custom job ID (optional)'
         required: false
-        default: '60'
-      max_wait_time:
-        description: 'Maximum time to wait for discovery completion (seconds)'
+      probe_ports:
+        description: 'TCP ports to probe during reachability scan (comma-separated)'
         required: false
-        default: '1800'
-      poll_interval:
-        description: 'Status check interval (seconds)'
-        required: false
-        default: '10'
+        default: '22,443'
 
 jobs:
   run-discovery:
@@ -171,6 +184,23 @@ jobs:
             echo "Using single credential set"
           fi
           
+          # Process probe ports
+          IFS=',' read -ra PORT_ARRAY <<< "${{ github.event.inputs.probe_ports }}"
+          PROBE_PORTS="["
+          for port in "${PORT_ARRAY[@]}"; do
+            if [ "$PROBE_PORTS" != "[" ]; then
+              PROBE_PORTS="$PROBE_PORTS,"
+            fi
+            PROBE_PORTS="$PROBE_PORTS$port"
+          done
+          PROBE_PORTS="$PROBE_PORTS]"
+          
+          # Set job ID if provided
+          JOB_ID_PARAM=""
+          if [ -n "${{ github.event.inputs.job_id }}" ]; then
+            JOB_ID_PARAM="\"job_id\": \"${{ github.event.inputs.job_id }}\","
+          fi
+          
           # Start discovery - IMPORTANT: We're NOT using wait_for_results=true here
           # because we want to handle the waiting with proper polling
           echo "Starting discovery job..."
@@ -179,9 +209,13 @@ jobs:
             -d "{
               \"seed_devices\": $SEED_DEVICES,
               \"credentials\": $CREDENTIALS,
+              \"mode\": \"${{ github.event.inputs.discovery_mode }}\",
               \"method\": \"${{ github.event.inputs.discovery_method }}\",
               \"max_depth\": ${{ github.event.inputs.max_depth }},
-              \"timeout\": ${{ github.event.inputs.timeout }}
+              \"timeout\": ${{ env.TIMEOUT }},
+              $JOB_ID_PARAM
+              \"probe_ports\": $PROBE_PORTS,
+              \"concurrency\": ${{ env.CONCURRENCY }}
             }")
           
           echo "API response: $RESPONSE"
@@ -214,8 +248,8 @@ jobs:
           
           # Wait for discovery to complete with timeout
           echo "Waiting for discovery job to complete..."
-          MAX_WAIT_TIME=${{ github.event.inputs.max_wait_time || 1800 }}  # Default: 30 minutes
-          WAIT_INTERVAL=${{ github.event.inputs.poll_interval || 10 }}    # Default: 10 seconds
+          MAX_WAIT_TIME=${{ env.MAX_WAIT_TIME }}  # Default: 30 minutes
+          WAIT_INTERVAL=${{ env.POLL_INTERVAL }}    # Default: 10 seconds
           ELAPSED_TIME=0
           
           while [ $ELAPSED_TIME -lt $MAX_WAIT_TIME ]; do
@@ -303,6 +337,10 @@ jobs:
           # Export device configurations as ZIP
           echo "Exporting device configurations..."
           curl -s --location --output discovery_exports/configs.zip "http://localhost:8080/discover/$JOB_ID/export?format=configs"
+          
+          # Export reachability results
+          echo "Exporting reachability results..."
+          curl -s --location --output discovery_exports/reachability_matrix.json "http://localhost:8080/discover/$JOB_ID/reachability"
           
           # List all exported files
           echo "Exported files:"

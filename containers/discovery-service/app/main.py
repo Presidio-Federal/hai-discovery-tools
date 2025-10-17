@@ -508,8 +508,8 @@ def export_discovery_data(
 
 @app.get("/discover/{job_id}/export/device_inventory")
 def export_device_inventory(job_id: str):
-    """Export device inventory to CSV."""
-    export_file = f"/app/data/exports/{job_id}/device_inventory.csv"
+    """Export device inventory to JSON."""
+    export_file = f"/app/data/exports/{job_id}/device_inventory.json"
     
     if not os.path.exists(export_file):
         # Try to generate the file if it doesn't exist
@@ -524,25 +524,25 @@ def export_device_inventory(job_id: str):
             except PermissionError:
                 logger.warning(f"Permission denied creating directory {export_dir}")
                 export_dir = "/app/data/exports"
-                export_file = f"{export_dir}/device_inventory_{job_id}.csv"
+                export_file = f"{export_dir}/device_inventory_{job_id}.json"
             
-            # Generate the CSV file
-            ConfigExporter.export_inventory_report(devices, export_file)
+            # Generate the JSON file
+            ConfigExporter.export_inventory_json(devices, export_file)
         else:
             raise HTTPException(status_code=404, detail="Export file not found and job data unavailable")
     
     return FileResponse(
         path=export_file,
-        filename=f"device_inventory_{job_id}.csv",
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename=device_inventory_{job_id}.csv"}
+        filename=f"device_inventory_{job_id}.json",
+        media_type="application/json",
+        headers={"Content-Disposition": f"attachment; filename=device_inventory_{job_id}.json"}
     )
 
 
 @app.get("/discover/{job_id}/export/interface_inventory")
 def export_interface_inventory(job_id: str):
-    """Export interface inventory to CSV."""
-    export_file = f"/app/data/exports/{job_id}/interface_inventory.csv"
+    """Export interface inventory to JSON."""
+    export_file = f"/app/data/exports/{job_id}/interface_inventory.json"
     
     if not os.path.exists(export_file):
         # Try to generate the file if it doesn't exist
@@ -557,18 +557,18 @@ def export_interface_inventory(job_id: str):
             except PermissionError:
                 logger.warning(f"Permission denied creating directory {export_dir}")
                 export_dir = "/app/data/exports"
-                export_file = f"{export_dir}/interface_inventory_{job_id}.csv"
+                export_file = f"{export_dir}/interface_inventory_{job_id}.json"
             
-            # Generate the CSV file
-            ConfigExporter.export_interface_report(devices, export_file)
+            # Generate the JSON file
+            ConfigExporter.export_interface_json(devices, export_file)
         else:
             raise HTTPException(status_code=404, detail="Export file not found and job data unavailable")
     
     return FileResponse(
         path=export_file,
-        filename=f"interface_inventory_{job_id}.csv",
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename=interface_inventory_{job_id}.csv"}
+        filename=f"interface_inventory_{job_id}.json",
+        media_type="application/json",
+        headers={"Content-Disposition": f"attachment; filename=interface_inventory_{job_id}.json"}
     )
 
 
@@ -581,20 +581,65 @@ def get_reachability_results(job_id: str):
     possible_paths = [
         f"/app/data/exports/{job_id}/reachability_matrix.json",  # Standard path
         f"/app/data/discovery/{job_id}/reachability_matrix.json",  # Alternative path used by some modules
-        f"/app/data/exports/reachability_matrix.json"  # Fallback path
+        f"/app/data/exports/reachability_matrix.json",  # Fallback path
+        f"/app/data/exports/{job_id}/discovery_data.json"  # Full discovery data
     ]
     
     # Try each path
     for path in possible_paths:
         logger.info(f"Checking for reachability data at: {path}")
         if os.path.exists(path):
-            logger.info(f"Found reachability data at: {path}")
+            logger.info(f"Found data at: {path}")
             try:
                 with open(path, 'r') as f:
-                    reachability_data = json.load(f)
-                return reachability_data
+                    data = json.load(f)
+                    
+                    # If this is the discovery_data.json file, extract the relevant reachability info
+                    if path.endswith("discovery_data.json"):
+                        # Create a reachability matrix from the discovered devices
+                        devices = data.get("devices", {})
+                        reachability_data = {
+                            "results": [],
+                            "summary": {
+                                "total_scanned": len(devices),
+                                "reachable": len([d for d in devices.values() if d.get("discovery_status") == "discovered"]),
+                                "unreachable": len([d for d in devices.values() if d.get("discovery_status") == "failed"])
+                            },
+                            "timestamp": data.get("start_time", datetime.now().isoformat()),
+                            "duration_sec": 0
+                        }
+                        
+                        # Add each device to the results
+                        for ip, device in devices.items():
+                            status = device.get("discovery_status", "unknown")
+                            open_ports = []
+                            
+                            # If we successfully connected, add port 22 as open
+                            if status == "discovered" and device.get("credentials_used", {}).get("port") == "22":
+                                open_ports.append(22)
+                            
+                            reachability_data["results"].append({
+                                "ip": ip,
+                                "icmp_responsive": status == "discovered",
+                                "open_ports": open_ports
+                            })
+                            
+                        # Save this reachability data for future use
+                        try:
+                            export_dir = f"/app/data/exports/{job_id}"
+                            os.makedirs(export_dir, exist_ok=True)
+                            reachability_file = f"{export_dir}/reachability_matrix.json"
+                            with open(reachability_file, 'w') as f:
+                                json.dump(reachability_data, f, indent=2, cls=DateTimeEncoder)
+                            logger.info(f"Saved extracted reachability data to: {reachability_file}")
+                        except Exception as e:
+                            logger.warning(f"Error saving reachability data to file: {str(e)}")
+                            
+                        return reachability_data
+                    else:
+                        return data
             except Exception as e:
-                logger.error(f"Error reading reachability data from {path}: {str(e)}")
+                logger.error(f"Error reading data from {path}: {str(e)}")
     
     # If file doesn't exist, check if we have reachability data in the job results
     if job_id in discovery_results:
@@ -623,6 +668,48 @@ def get_reachability_results(job_id: str):
                         logger.warning(f"Error saving reachability data to file: {str(e)}")
                     
                     return stats
+        
+        # If we have devices, create reachability data from them
+        if "result" in result and "devices" in result["result"]:
+            devices = result["result"]["devices"]
+            reachability_data = {
+                "results": [],
+                "summary": {
+                    "total_scanned": len(devices),
+                    "reachable": len([d for d in devices.values() if d.get("discovery_status") == "discovered"]),
+                    "unreachable": len([d for d in devices.values() if d.get("discovery_status") == "failed"])
+                },
+                "timestamp": result.get("start_time", datetime.now().isoformat()),
+                "duration_sec": 0
+            }
+            
+            # Add each device to the results
+            for ip, device in devices.items():
+                status = device.get("discovery_status", "unknown")
+                open_ports = []
+                
+                # If we successfully connected, add port 22 as open
+                if status == "discovered" and device.get("credentials_used", {}).get("port") == "22":
+                    open_ports.append(22)
+                
+                reachability_data["results"].append({
+                    "ip": ip,
+                    "icmp_responsive": status == "discovered",
+                    "open_ports": open_ports
+                })
+                
+            # Save this reachability data for future use
+            try:
+                export_dir = f"/app/data/exports/{job_id}"
+                os.makedirs(export_dir, exist_ok=True)
+                reachability_file = f"{export_dir}/reachability_matrix.json"
+                with open(reachability_file, 'w') as f:
+                    json.dump(reachability_data, f, indent=2, cls=DateTimeEncoder)
+                logger.info(f"Saved generated reachability data to: {reachability_file}")
+            except Exception as e:
+                logger.warning(f"Error saving reachability data to file: {str(e)}")
+                
+            return reachability_data
     
     # If we couldn't find reachability data
     logger.warning(f"Reachability data not found for job: {job_id}")

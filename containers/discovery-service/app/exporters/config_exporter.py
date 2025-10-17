@@ -148,6 +148,100 @@ class ConfigExporter:
             return False
     
     @classmethod
+    def export_inventory_json(cls, devices: Dict[str, Any], output_file: str) -> bool:
+        """
+        Export a network inventory report in JSON format.
+        
+        Args:
+            devices: Dictionary of devices with their information
+            output_file: The path to the output file
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Make sure we're using the /app/data directory
+            if not output_file.startswith("/app/data/"):
+                output_file = f"/app/data/exports/{os.path.basename(output_file)}"
+                
+            # Create directory if it doesn't exist
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+            except PermissionError:
+                logger.warning(f"Permission denied creating directory for {output_file}")
+                # Try to use a directory we know exists
+                output_file = f"/app/data/exports/{os.path.basename(output_file)}"
+            
+            # Prepare device inventory data
+            inventory_data = []
+            
+            for ip, device in devices.items():
+                # Clean up hostname if it contains error message
+                hostname = cls._get_value(device, "hostname", "")
+                if hostname and (str(hostname).startswith("^") or "Invalid input" in str(hostname)):
+                    # Try to get hostname from parsed_config
+                    parsed_config = cls._get_value(device, "parsed_config", {})
+                    if isinstance(parsed_config, dict) and "hostname" in parsed_config:
+                        hostname = parsed_config["hostname"]
+                    else:
+                        hostname = ""
+                    
+                # Get device information from various sources
+                platform = cls._get_value(device, "platform", "")
+                os_version = cls._get_value(device, "os_version", "")
+                
+                # Try to get model from device_info or parsed_config
+                model = cls._get_value(device, "model", "")
+                if not model:
+                    # Try to extract model from parsed config
+                    parsed_config = cls._get_value(device, "parsed_config", {})
+                    if isinstance(parsed_config, dict):
+                        # Check inventory section if it exists
+                        if "inventory" in parsed_config and isinstance(parsed_config["inventory"], list):
+                            for item in parsed_config["inventory"]:
+                                if item.get("name", "").lower() == "chassis":
+                                    model = item.get("pid", "")
+                                    break
+                
+                # Try to get serial number from device_info or parsed_config
+                serial = cls._get_value(device, "serial_number", "")
+                if not serial:
+                    # Try to extract serial from parsed config
+                    parsed_config = cls._get_value(device, "parsed_config", {})
+                    if isinstance(parsed_config, dict):
+                        # Check inventory section if it exists
+                        if "inventory" in parsed_config and isinstance(parsed_config["inventory"], list):
+                            for item in parsed_config["inventory"]:
+                                if item.get("name", "").lower() == "chassis":
+                                    serial = item.get("sn", "")
+                                    break
+                
+                status = cls._get_value(device, "discovery_status", "")
+                
+                # Create device entry
+                device_entry = {
+                    "ip_address": ip,
+                    "hostname": hostname,
+                    "platform": platform,
+                    "os_version": os_version,
+                    "model": model,
+                    "serial_number": serial,
+                    "status": status
+                }
+                
+                inventory_data.append(device_entry)
+            
+            # Write JSON data
+            with open(output_file, 'w') as f:
+                json.dump({"devices": inventory_data}, f, indent=2, cls=DateTimeEncoder)
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error exporting inventory JSON: {str(e)}")
+            return False
+    
+    @classmethod
     def export_inventory_report(cls, devices: Dict[str, Any], output_file: str) -> bool:
         """
         Export a network inventory report in CSV format.
@@ -233,6 +327,86 @@ class ConfigExporter:
             
         except Exception as e:
             logger.error(f"Error exporting inventory report: {str(e)}")
+            return False
+    
+    @classmethod
+    def export_interface_json(cls, devices: Dict[str, Any], output_file: str) -> bool:
+        """
+        Export a network interface report in JSON format.
+        
+        Args:
+            devices: Dictionary of devices with their interface information
+            output_file: The path to the output file
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Make sure we're using the /app/data directory
+            if not output_file.startswith("/app/data/"):
+                output_file = f"/app/data/exports/{os.path.basename(output_file)}"
+                
+            # Create directory if it doesn't exist
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+            except PermissionError:
+                logger.warning(f"Permission denied creating directory for {output_file}")
+                # Try to use a directory we know exists
+                output_file = f"/app/data/exports/{os.path.basename(output_file)}"
+            
+            # Prepare interface inventory data
+            interface_data = []
+            
+            # Process each device
+            for ip, device in devices.items():
+                # Get hostname
+                hostname = cls._get_value(device, "hostname", "")
+                if not hostname:
+                    hostname = ip
+                
+                # Try to get interfaces from the device
+                interfaces = []
+                
+                # Check different ways interfaces might be stored
+                device_interfaces = cls._get_value(device, "interfaces", [])
+                
+                # Log what we found for debugging
+                logger.debug(f"Device {ip}: Found {len(device_interfaces)} interfaces")
+                
+                # Process each interface
+                for intf in device_interfaces:
+                    # Handle both dictionary and object interfaces
+                    if hasattr(intf, 'dict') and callable(intf.dict):
+                        # It's a Pydantic model
+                        interface_entry = intf.dict()
+                    elif isinstance(intf, dict):
+                        # It's already a dictionary
+                        interface_entry = intf
+                    else:
+                        # Try to convert to dict
+                        try:
+                            interface_entry = intf.__dict__
+                        except:
+                            logger.warning(f"Could not convert interface to dict: {intf}")
+                            continue
+                    
+                    # Add device information
+                    interface_entry["device_ip"] = ip
+                    interface_entry["device_hostname"] = hostname
+                    
+                    # Add to the list
+                    interface_data.append(interface_entry)
+            
+            # Write JSON data
+            with open(output_file, 'w') as f:
+                json.dump({"interfaces": interface_data}, f, indent=2, cls=DateTimeEncoder)
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error exporting interface JSON: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
     
     @classmethod

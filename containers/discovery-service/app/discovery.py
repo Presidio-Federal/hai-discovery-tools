@@ -149,6 +149,22 @@ class NetworkDiscovery:
                 subnets=subnets
             )
             
+            # If no subnets were extracted, fall back to direct device discovery
+            if not subnets:
+                loguru_logger.warning(
+                    "No subnets extracted from seed devices, falling back to direct device discovery",
+                    job_id=self.config.job_id
+                )
+                
+                # Log the transition to full pipeline discovery
+                std_logger.info(f"Falling back to full pipeline discovery for job: {self.config.job_id}")
+                
+                # Override the method name for the full pipeline
+                self.method_name = self._get_method_for_mode("full-pipeline")
+                
+                # Fall back to full pipeline discovery
+                return await self._run_full_pipeline_discovery()
+            
             # Save extracted subnets to file
             if self.config.job_id:
                 write_artifact(

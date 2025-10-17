@@ -72,10 +72,20 @@ class DiscoveryConfig(BaseModel):
         - IP
         - IP:PORT
         """
-        if ":" in device:
-            parts = device.split(":", 1)
-            return parts[0], int(parts[1])
-        return device, 22  # Default SSH port
+        try:
+            if ":" in device:
+                parts = device.split(":", 1)
+                if len(parts) == 2:
+                    return parts[0], int(parts[1])
+                else:
+                    # Handle IPv6 addresses or other formats with multiple colons
+                    return device, 22
+            return device, 22  # Default SSH port
+        except Exception as e:
+            # Log the error and return a default
+            import logging
+            logging.getLogger(__name__).error(f"Error parsing seed device {device}: {str(e)}")
+            return device, 22
 
 
 class DiscoveryResult(BaseModel):

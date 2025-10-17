@@ -27,7 +27,11 @@ async def introspect_seed_devices(config: DiscoveryConfig) -> List[str]:
     
     for seed_device in config.seed_devices:
         # Parse seed device to get IP and port
-        ip_address, port = config.parse_seed_device(seed_device)
+        try:
+            ip_address, port = config.parse_seed_device(seed_device)
+        except Exception as e:
+            logger.error(f"Error parsing seed device {seed_device}: {str(e)}")
+            continue
         
         # Try each credential
         for credential_dict in config.credentials:
@@ -36,7 +40,7 @@ async def introspect_seed_devices(config: DiscoveryConfig) -> List[str]:
                 credential = Credential(**credential_dict)
                 
                 # Detect device type
-                device_type, _ = await device_handler.detect_device_type(ip_address, credential, port)
+                device_type = await device_handler.detect_device_type(ip_address, credential, port)
                 
                 if not device_type:
                     logger.warning(f"Could not detect device type for {ip_address}:{port}")
