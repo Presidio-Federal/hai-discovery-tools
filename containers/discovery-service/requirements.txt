@@ -27,6 +27,9 @@ ntc-templates==3.5.0
 psutil==6.0.0
 python-dotenv>=1.1.0
 loguru==0.7.2
+aioping==0.4.0
+asyncssh==2.14.2
+async-timeout==4.0.3
 
 # --- HAI / MCP Integration ---
 pydantic>=2.11.7

@@ -12,11 +12,17 @@ from datetime import datetime, date
 
 logger = logging.getLogger(__name__)
 
-# Custom JSON encoder to handle datetime objects
+# Custom JSON encoder to handle datetime objects and Pydantic models
 class DateTimeEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, (datetime, date)):
             return obj.isoformat()
+        # Handle Pydantic models
+        if hasattr(obj, 'dict') and callable(obj.dict):
+            return obj.dict()
+        # Handle other custom objects
+        if hasattr(obj, '__dict__'):
+            return obj.__dict__
         return super().default(obj)
 
 
@@ -173,11 +179,27 @@ class TopologyExporter:
                 
             # Log device details for debugging
             for ip, device in devices.items():
-                logger.debug(f"Device: {ip}, hostname: {device.get('hostname', 'unknown')}, type: {device.get('device_type', 'unknown')}")
+                # Handle both dictionary and Pydantic model objects
+                if hasattr(device, 'dict'):
+                    # It's a Pydantic model
+                    hostname = getattr(device, 'hostname', 'unknown')
+                    device_type = getattr(device, 'device_type', 'unknown')
+                else:
+                    # It's a dictionary
+                    hostname = device.get('hostname', 'unknown')
+                    device_type = device.get('device_type', 'unknown')
+                logger.debug(f"Device: {ip}, hostname: {hostname}, type: {device_type}")
                 
             # Log connection details for debugging
             for i, conn in enumerate(connections):
-                logger.debug(f"Connection {i}: {conn.get('source', 'unknown')} -> {conn.get('target', 'unknown')}")
+                # Handle both dictionary and object connections
+                if hasattr(conn, 'get'):
+                    source = conn.get('source', 'unknown')
+                    target = conn.get('target', 'unknown')
+                else:
+                    source = getattr(conn, 'source', 'unknown')
+                    target = getattr(conn, 'target', 'unknown')
+                logger.debug(f"Connection {i}: {source} -> {target}")
             
             # Generate HTML content with D3.js
             # Clean up the data before sending it to the browser
@@ -186,22 +208,52 @@ class TopologyExporter:
                 "connections": topology_data.get("connections", [])
             }
             
+            # Log connections for debugging
+            logger.info(f"Exporting topology with {len(cleaned_data['connections'])} connections")
+            for conn in cleaned_data["connections"]:
+                # Handle both dictionary and object connections
+                if hasattr(conn, 'get'):
+                    source = conn.get('source', 'unknown')
+                    target = conn.get('target', 'unknown')
+                else:
+                    source = getattr(conn, 'source', 'unknown')
+                    target = getattr(conn, 'target', 'unknown')
+                logger.info(f"Connection in export: {source} -> {target}")
+            
             # Process and clean devices
             for ip, device in topology_data.get("devices", {}).items():
+                # Handle both dictionary and Pydantic model objects
+                if hasattr(device, 'dict') and callable(device.dict):
+                    # It's a Pydantic model
+                    hostname = getattr(device, 'hostname', ip)
+                    platform = getattr(device, 'platform', "unknown")
+                    device_type = getattr(device, 'device_type', "unknown")
+                    discovery_status = getattr(device, 'discovery_status', "unknown")
+                    interfaces = getattr(device, 'interfaces', [])
+                else:
+                    # It's a dictionary
+                    hostname = device.get("hostname", ip)
+                    platform = device.get("platform", "unknown")
+                    device_type = device.get("device_type", "unknown")
+                    discovery_status = device.get("discovery_status", "unknown")
+                    interfaces = device.get("interfaces", [])
+                
                 cleaned_device = {
-                    "hostname": device.get("hostname", ip),
+                    "hostname": hostname,
                     "ip_address": ip,
-                    "platform": device.get("platform", "unknown"),
-                    "device_type": device.get("device_type", "unknown"),
-                    "discovery_status": device.get("discovery_status", "unknown"),
-                    "interfaces": device.get("interfaces", [])
+                    "platform": platform,
+                    "device_type": device_type,
+                    "discovery_status": discovery_status,
+                    "interfaces": interfaces
                 }
                 
                 # Don't include the full config in the visualization data
-                if "config" in device:
-                    del device["config"]
-                if "parsed_config" in device:
-                    del device["parsed_config"]
+                # For Pydantic models, we'll skip this part as they're handled differently
+                if not hasattr(device, 'dict'):
+                    if "config" in device:
+                        del device["config"]
+                    if "parsed_config" in device:
+                        del device["parsed_config"]
                     
                 cleaned_data["devices"][ip] = cleaned_device
             
@@ -331,12 +383,17 @@ class TopologyExporter:
             
         // Initialize force simulation with stronger forces to ensure visibility
         const simulation = d3.forceSimulation(nodes)
-            .force("link", d3.forceLink(links).id(d => d.id).distance(100))
-            .force("charge", d3.forceManyBody().strength(-400))
-            .force("collide", d3.forceCollide().radius(50).strength(1))
+            .force("link", d3.forceLink(links).id(d => d.id).distance(80))
+            .force("charge", d3.forceManyBody().strength(-300))
+            .force("collide", d3.forceCollide().radius(40).strength(1))
             .force("center", d3.forceCenter(width / 2, height / 2))
-            .alphaDecay(0.01) // Slower cooling for better layout
-            .alpha(1).restart() // Restart with high energy
+            .force("x", d3.forceX(width / 2).strength(0.1))
+            .force("y", d3.forceY(height / 2).strength(0.1))
+            .alphaDecay(0.005) // Very slow cooling for better layout
+            .alpha(1)
+            .alphaTarget(0)
+            .velocityDecay(0.3)
+            .restart() // Restart with high energy
         
         const svg = d3.select("#topology")
             .append("svg")
@@ -353,8 +410,21 @@ class TopologyExporter:
                 g.attr("transform", event.transform);
             }));
             
-        // Define device icons
+        // Define device icons and markers
         const defs = svg.append("defs");
+        
+        // Add arrowhead marker for links
+        defs.append("marker")
+            .attr("id", "arrowhead")
+            .attr("viewBox", "0 -5 10 10")
+            .attr("refX", 25) // Position away from node
+            .attr("refY", 0)
+            .attr("markerWidth", 6)
+            .attr("markerHeight", 6)
+            .attr("orient", "auto")
+            .append("path")
+            .attr("d", "M0,-5L10,0L0,5")
+            .attr("fill", "#999");
         
         // Router icon
         defs.append("svg:symbol")
@@ -394,7 +464,8 @@ class TopologyExporter:
             .append("line")
             .attr("class", "link")
             .attr("stroke", "#333")
-            .attr("stroke-width", 2);
+            .attr("stroke-width", 2)
+            .attr("marker-end", "url(#arrowhead)");
         
         // Create link labels with better visibility
         const linkText = g.append("g")

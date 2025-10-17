@@ -61,6 +61,9 @@ class DiscoveryConfig(BaseModel):
     concurrent_connections: int = 10
     retry_count: int = 2
     exclude_patterns: List[str] = Field(default_factory=list)
+    mode: str = "full-pipeline"  # "subnet", "seed-device", or "full-pipeline"
+    job_id: Optional[str] = None
+    stats: Dict[str, Any] = Field(default_factory=dict)  # For additional parameters like probe_ports
     
     def parse_seed_device(self, device: str) -> Tuple[str, int]:
         """Parse seed device string to extract IP and port.
@@ -87,3 +90,20 @@ class DiscoveryResult(BaseModel):
     successful_connections: int = 0
     failed_connections: int = 0
     stats: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DiscoveryRequest(BaseModel):
+    """Request model for the discovery API endpoint."""
+    seed_devices: List[str]
+    credentials: List[Dict[str, str]]
+    method: str = "auto"
+    mode: str = "full-pipeline"
+    max_depth: int = 3
+    discovery_protocols: List[str] = ["cdp", "lldp"]
+    timeout: int = 60
+    concurrent_connections: int = 10
+    exclude_patterns: List[str] = Field(default_factory=list)
+    wait_for_results: bool = False
+    job_id: Optional[str] = None
+    probe_ports: List[int] = [22, 443]
+    concurrency: int = 200

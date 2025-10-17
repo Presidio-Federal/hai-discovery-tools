@@ -16,6 +16,11 @@ RUN apt-get update && apt-get install -y \
     openssh-client \
     curl \
     wget \
+    tcpdump \
+    telnet \
+    dnsutils \
+    net-tools \
+    iproute2 \
     && rm -rf /var/lib/apt/lists/*
     
 # Copy requirements and install Python dependencies
@@ -41,6 +46,12 @@ RUN apt-get update && apt-get install -y \
     netcat-openbsd \
     snmp \
     snmpd \
+    sshpass \
+    curl \
+    telnet \
+    dnsutils \
+    net-tools \
+    iproute2 \
     && rm -rf /var/lib/apt/lists/*
     
 # Copy installed packages and application

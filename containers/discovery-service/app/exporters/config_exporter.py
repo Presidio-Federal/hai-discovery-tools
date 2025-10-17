@@ -8,15 +8,55 @@ import os
 import logging
 from typing import Dict, List, Any, Optional
 import json
+from datetime import datetime, date
 
 logger = logging.getLogger(__name__)
+
+# Custom JSON encoder to handle datetime objects and Pydantic models
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        # Handle Pydantic models
+        if hasattr(obj, 'dict') and callable(obj.dict):
+            return obj.dict()
+        # Handle other custom objects
+        if hasattr(obj, '__dict__'):
+            return obj.__dict__
+        return super().default(obj)
 
 
 class ConfigExporter:
     """Exporter for network device configurations."""
     
-    @staticmethod
-    def export_raw_configs(devices: Dict[str, Any], output_dir: str) -> bool:
+    @classmethod
+    def _get_value(obj, key, default=None):
+        """
+        Safely extract a value from an object or dictionary.
+        
+        Args:
+            obj: Object or dictionary to extract value from
+            key: Key or attribute name
+            default: Default value if key/attribute doesn't exist
+            
+        Returns:
+            The value or default
+        """
+        if hasattr(obj, 'dict') and callable(obj.dict):
+            # It's a Pydantic model
+            return getattr(obj, key, default)
+        elif hasattr(obj, 'get'):
+            # It's a dictionary
+            return obj.get(key, default)
+        elif hasattr(obj, key):
+            # It's an object with the attribute
+            return getattr(obj, key, default)
+        else:
+            # Default case
+            return default
+    
+    @classmethod
+    def export_raw_configs(cls, devices: Dict[str, Any], output_dir: str) -> bool:
         """
         Export raw device configurations to text files.
         
@@ -42,15 +82,18 @@ class ConfigExporter:
             
             # Export each device's configuration
             for ip, device in devices.items():
-                if not device.get("config"):
+                # Skip devices without config
+                config = self._get_value(device, "config")
+                if not config:
                     continue
-                    
+                
                 # Use hostname if available, otherwise use IP
-                filename = device.get("hostname", ip).replace("/", "_")
+                hostname = self._get_value(device, "hostname", ip)
+                filename = str(hostname).replace("/", "_")
                 filepath = os.path.join(output_dir, f"{filename}.txt")
                 
                 with open(filepath, 'w') as f:
-                    f.write(device["config"])
+                    f.write(config)
                     
             return True
             
@@ -58,8 +101,8 @@ class ConfigExporter:
             logger.error(f"Error exporting raw configs: {str(e)}")
             return False
     
-    @staticmethod
-    def export_parsed_configs(devices: Dict[str, Any], output_dir: str) -> bool:
+    @classmethod
+    def export_parsed_configs(cls, devices: Dict[str, Any], output_dir: str) -> bool:
         """
         Export parsed device configurations to JSON files.
         
@@ -85,15 +128,18 @@ class ConfigExporter:
             
             # Export each device's parsed configuration
             for ip, device in devices.items():
-                if not device.get("parsed_config"):
+                # Skip devices without parsed config
+                parsed_config = self._get_value(device, "parsed_config")
+                if not parsed_config:
                     continue
-                    
+                
                 # Use hostname if available, otherwise use IP
-                filename = device.get("hostname", ip).replace("/", "_")
+                hostname = self._get_value(device, "hostname", ip)
+                filename = str(hostname).replace("/", "_")
                 filepath = os.path.join(output_dir, f"{filename}.json")
                 
                 with open(filepath, 'w') as f:
-                    json.dump(device["parsed_config"], f, indent=2)
+                    json.dump(parsed_config, f, indent=2, cls=DateTimeEncoder)
                     
             return True
             
@@ -101,8 +147,8 @@ class ConfigExporter:
             logger.error(f"Error exporting parsed configs: {str(e)}")
             return False
     
-    @staticmethod
-    def export_inventory_report(devices: Dict[str, Any], output_file: str) -> bool:
+    @classmethod
+    def export_inventory_report(cls, devices: Dict[str, Any], output_file: str) -> bool:
         """
         Export a network inventory report in CSV format.
         
@@ -189,8 +235,8 @@ class ConfigExporter:
             logger.error(f"Error exporting inventory report: {str(e)}")
             return False
     
-    @staticmethod
-    def export_interface_report(devices: Dict[str, Any], output_file: str) -> bool:
+    @classmethod
+    def export_interface_report(cls, devices: Dict[str, Any], output_file: str) -> bool:
         """
         Export a network interface report in CSV format.
         
@@ -230,10 +276,28 @@ class ConfigExporter:
                         else:
                             hostname = ""
                     
-                    # Try to get interfaces from device or from parsed_config
-                    interfaces = device.get("interfaces", [])
+                    # Try to get interfaces from device
+                    interfaces = []
                     
-                    # If no interfaces found, try to extract from parsed_config
+                    # Handle different ways interfaces might be stored
+                    if "interfaces" in device:
+                        device_interfaces = device.get("interfaces", [])
+                        # Check if it's a list or another data type
+                        if isinstance(device_interfaces, list):
+                            interfaces = device_interfaces
+                        elif hasattr(device_interfaces, '__iter__'):
+                            # Convert iterable to list
+                            interfaces = list(device_interfaces)
+                    
+                    # If interfaces is empty, try to get from the device object's __dict__ if it has one
+                    if not interfaces and hasattr(device, '__dict__') and hasattr(device.__dict__, 'get'):
+                        device_dict = device.__dict__
+                        if "interfaces" in device_dict:
+                            device_interfaces = device_dict.get("interfaces", [])
+                            if isinstance(device_interfaces, list):
+                                interfaces = device_interfaces
+                    
+                    # If still no interfaces found, try to extract from parsed_config
                     if not interfaces and "parsed_config" in device:
                         parsed_config = device.get("parsed_config", {})
                         if isinstance(parsed_config, dict) and "interfaces" in parsed_config:
@@ -248,6 +312,12 @@ class ConfigExporter:
                                         "status": "up" if not intf.get("shutdown", True) else "down",
                                         "vlan": intf.get("vlan", ""),
                                     })
+                    
+                    # Last resort: try to access interfaces directly as an attribute
+                    if not interfaces and hasattr(device, 'interfaces'):
+                        device_interfaces = device.interfaces
+                        if isinstance(device_interfaces, list):
+                            interfaces = device_interfaces
                     
                     # Add connection information from neighbors
                     neighbor_connections = {}

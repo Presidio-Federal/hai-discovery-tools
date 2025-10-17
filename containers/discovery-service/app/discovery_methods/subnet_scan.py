@@ -91,34 +91,43 @@ class SubnetScanDiscovery(DiscoveryMethodBase):
     
     async def _discover_hosts(self) -> List[str]:
         """Discover live hosts in the specified subnets."""
-        live_hosts = []
+        from app.discovery_methods.ip_reachability import IPReachabilityDiscovery
         
-        for subnet in self.subnets:
-            try:
-                # Use fping for efficient host discovery (installed in the Dockerfile)
-                network = ipaddress.ip_network(subnet, strict=False)
+        try:
+            # Use the new IP reachability module
+            ip_reachability = IPReachabilityDiscovery(self.config)
+            
+            # Get reachability results
+            reachability_results = await ip_reachability.discover_reachable_hosts(
+                self.subnets,
+                probe_ports=[22, 443],  # Default probe ports
+                concurrency=self.config.concurrent_connections
+            )
+            
+            # Save reachability results to a file if job_id is available
+            if hasattr(self.config, 'job_id') and self.config.job_id:
+                job_id = self.config.job_id
+                from app.utils import write_artifact
+                write_artifact(job_id, "reachability_matrix.json", reachability_results)
+            
+            # Extract live hosts from results (hosts that are ICMP reachable or have open ports)
+            live_hosts = []
+            for host_result in reachability_results["results"]:
+                ip = host_result["ip"]
+                icmp_reachable = host_result["icmp_reachable"]
+                open_ports = host_result["open_ports"]
                 
-                # For small networks, scan all hosts
-                if network.num_addresses <= 256:
-                    # Create target list for fping
-                    targets = [str(ip) for ip in network.hosts()]
-                    live_ips = await self._fping_scan(targets)
-                    live_hosts.extend(live_ips)
-                else:
-                    # For larger networks, scan in chunks
-                    chunk_size = 256
-                    all_hosts = list(network.hosts())
-                    
-                    for i in range(0, len(all_hosts), chunk_size):
-                        chunk = all_hosts[i:i+chunk_size]
-                        targets = [str(ip) for ip in chunk]
-                        live_ips = await self._fping_scan(targets)
-                        live_hosts.extend(live_ips)
-                
-            except Exception as e:
-                logger.error(f"Error scanning subnet {subnet}: {str(e)}")
-        
-        return live_hosts
+                if icmp_reachable or open_ports:
+                    live_hosts.append(ip)
+            
+            # Update stats with reachability summary
+            self.result.stats.update(reachability_results["summary"])
+            
+            return live_hosts
+            
+        except Exception as e:
+            logger.error(f"Error discovering hosts: {str(e)}")
+            return []
     
     async def _fping_scan(self, targets: List[str]) -> List[str]:
         """Scan a list of IP addresses using fping."""

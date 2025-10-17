@@ -357,6 +357,32 @@ class NeighborDiscovery(DiscoveryMethodBase):
             if re.match(pattern, ip_address):
                 return True
         return False
+        
+    def _guess_device_type(self, platform: str) -> str:
+        """Guess device type from platform name."""
+        platform = platform.lower()
+        
+        if "cisco" in platform:
+            if "nx" in platform:
+                return "cisco_nxos"
+            elif "xr" in platform:
+                return "cisco_xr"
+            elif "ios" in platform:
+                return "cisco_ios"
+            else:
+                return "cisco_xe"  # Default to IOS-XE
+        elif "juniper" in platform:
+            return "juniper_junos"
+        elif "arista" in platform:
+            return "arista_eos"
+        elif "huawei" in platform:
+            return "huawei"
+        elif "fortinet" in platform:
+            return "fortinet"
+        elif "palo" in platform:
+            return "paloalto_panos"
+        else:
+            return "unknown"
     
     def _build_topology(self) -> None:
         """Build network topology map from discovered devices."""
@@ -404,13 +430,21 @@ class NeighborDiscovery(DiscoveryMethodBase):
                         
                     # If the neighbor isn't in our devices yet, add a placeholder
                     if neighbor_ip not in self.result.devices:
-                        # Create a placeholder device for the neighbor
+                        # Create a placeholder device for the neighbor with more complete information
+                        hostname = neighbor.get("hostname", neighbor_ip)
+                        platform = neighbor.get("platform", "unknown")
+                        
+                        # Extract platform name from full platform string if available
+                        if " " in platform:
+                            platform_parts = platform.split(" ", 1)
+                            platform = platform_parts[0]  # Take just the vendor name
+                        
                         neighbor_device = Device(
-                            hostname=neighbor.get("hostname", neighbor_ip),
+                            hostname=hostname,
                             ip_address=neighbor_ip,
-                            platform=neighbor.get("platform", "unknown"),
-                            device_type="unknown",
-                            discovery_status="pending"  # Mark as pending so we know it wasn't fully discovered
+                            platform=platform,
+                            device_type=self._guess_device_type(platform),
+                            discovery_status="discovered"  # Mark as discovered so it appears in the topology
                         )
                         self.result.devices[neighbor_ip] = neighbor_device
                         logger.info(f"Added placeholder device for neighbor {neighbor_ip}")
@@ -454,6 +488,11 @@ class NeighborDiscovery(DiscoveryMethodBase):
                                 device_interface.connected_to = f"{neighbor.get('hostname', neighbor_ip)}:{neighbor.get('remote_interface')}"
                                 logger.info(f"Updated interface connection: {device_interface.name} -> {device_interface.connected_to}")
                                 break
+        
+        # Log topology and connections
+        logger.info(f"Built topology with {len(topology)} nodes and {len(connections)} connections")
+        for conn in connections:
+            logger.info(f"Connection: {conn['source']} ({conn['source_port']}) -> {conn['target']} ({conn['target_port']})")
         
         # Store in result
         self.result.topology = topology

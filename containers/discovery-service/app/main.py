@@ -23,7 +23,7 @@ class DateTimeEncoder(json.JSONEncoder):
 
 from app.discovery import NetworkDiscovery
 from app.registry import DiscoveryMethodRegistry
-from app.models import DiscoveryConfig
+from app.models import DiscoveryConfig, DiscoveryRequest
 from app.exporters.topology_exporter import TopologyExporter
 from app.exporters.config_exporter import ConfigExporter
 
@@ -87,38 +87,68 @@ def list_methods():
 @app.post("/discover")
 async def discover(
     background_tasks: BackgroundTasks,
-    seed_devices: List[str],
-    credentials: List[Dict[str, str]],
-    method: str = "neighbor_discovery",
-    max_depth: int = 3,
-    discovery_protocols: List[str] = ["cdp", "lldp"],
-    timeout: int = 60,
-    concurrent_connections: int = 10,
-    exclude_patterns: List[str] = [],
-    wait_for_results: bool = False
+    request: DiscoveryRequest
 ):
     """
     Start a discovery operation.
     
-    Parameters:
-    - seed_devices: List of devices to start discovery from (can include port like "ip:port")
+    Request body:
+    - seed_devices: List of devices or subnets to start discovery from (can include port like "ip:port")
     - credentials: List of credential sets to try
-    - method: Discovery method to use
+    - method: Discovery method to use ("auto" selects based on mode)
+    - mode: Discovery mode ("subnet", "seed-device", or "full-pipeline")
     - max_depth: Maximum depth of discovery
     - discovery_protocols: Protocols to use for neighbor discovery
     - timeout: Connection timeout in seconds
     - concurrent_connections: Maximum number of concurrent connections
     - exclude_patterns: Patterns for IPs to exclude
     - wait_for_results: If true, wait for discovery to complete and return results directly
+    - job_id: Optional custom job ID
+    - probe_ports: List of TCP ports to probe for reachability
+    - concurrency: Maximum number of concurrent operations for IP reachability
     
     Returns a job ID that can be used to retrieve results, or the complete results if wait_for_results is true.
     """
-    # Validate the discovery method
-    if not DiscoveryMethodRegistry.get_method(method):
+    # Extract values from request
+    seed_devices = request.seed_devices
+    credentials = request.credentials
+    method = request.method
+    mode = request.mode
+    max_depth = request.max_depth
+    discovery_protocols = request.discovery_protocols
+    timeout = request.timeout
+    concurrent_connections = request.concurrent_connections
+    exclude_patterns = request.exclude_patterns
+    wait_for_results = request.wait_for_results
+    job_id = request.job_id
+    probe_ports = request.probe_ports
+    concurrency = request.concurrency
+    
+    # Validate the discovery method if not auto
+    if method != "auto" and not DiscoveryMethodRegistry.get_method(method):
         raise HTTPException(status_code=400, detail=f"Unknown discovery method: {method}")
     
-    # Create a unique job ID
-    job_id = f"discovery_{datetime.now().strftime('%Y%m%d%H%M%S')}_{len(discovery_results) + 1}"
+    # Validate the mode
+    valid_modes = ["subnet", "seed-device", "full-pipeline"]
+    if mode not in valid_modes:
+        raise HTTPException(status_code=400, detail=f"Invalid mode: {mode}. Must be one of {valid_modes}")
+    
+    # Use the provided job ID or create a unique one
+    if job_id:
+        # Make sure job_id is valid and doesn't contain characters that could cause issues
+        import re
+        if not re.match(r'^[a-zA-Z0-9_-]+$', job_id):
+            raise HTTPException(status_code=400, detail="Invalid job_id. Use only alphanumeric characters, hyphens, and underscores.")
+        logger.info(f"Using provided job_id: {job_id}")
+    else:
+        job_id = f"discovery_{datetime.now().strftime('%Y%m%d%H%M%S')}_{len(discovery_results) + 1}"
+        logger.info(f"Generated job_id: {job_id}")
+    
+    # Create additional stats for IP reachability
+    stats = {
+        "probe_ports": probe_ports,
+        "concurrency": concurrency
+    }
     
     # Create discovery configuration
     config = DiscoveryConfig(
@@ -128,7 +158,10 @@ async def discover(
         discovery_protocols=discovery_protocols,
         timeout=timeout,
         concurrent_connections=concurrent_connections,
-        exclude_patterns=exclude_patterns
+        exclude_patterns=exclude_patterns,
+        mode=mode,
+        job_id=job_id,
+        stats=stats
     )
     
     # Store initial job status
@@ -136,14 +169,25 @@ async def discover(
         "status": "pending",
         "start_time": datetime.now().isoformat(),
         "config": config.dict(exclude={"credentials"}),  # Don't include credentials in response
-        "method": method
+        "method": method,
+        "mode": mode
     }
     
     if wait_for_results:
         # Run discovery synchronously
         await run_discovery_job(job_id, config, method)
+        
+        # Get the result
+        result = discovery_results[job_id]
+        
+        # Add artifact path if available
+        if "result" in result and "stats" in result["result"]:
+            stats = result["result"]["stats"]
+            if "artifact" in stats:
+                result["artifact"] = stats["artifact"]
+        
         # Return complete results
-        return discovery_results[job_id]
+        return result
     else:
         # Start discovery in background
         background_tasks.add_task(run_discovery_job, job_id, config, method)
@@ -152,13 +196,15 @@ async def discover(
         return {
             "job_id": job_id, 
             "status": "pending",
+            "mode": mode,
             "endpoints": {
                 "status": f"/discover/{job_id}",
                 "devices": f"/discover/{job_id}/devices",
                 "topology": f"/discover/{job_id}/topology",
-                "export": f"/discover/{job_id}/export"
+                "export": f"/discover/{job_id}/export",
+                "reachability": f"/discover/{job_id}/reachability"
             },
-            "message": "Discovery job started. Use the endpoints above to check status and results."
+            "message": f"Discovery job started in {mode} mode. Use the endpoints above to check status and results."
         }
 
 
@@ -526,6 +572,63 @@ def export_interface_inventory(job_id: str):
     )
 
 
+@app.get("/discover/{job_id}/reachability")
+def get_reachability_results(job_id: str):
+    """Get reachability results for a discovery job."""
+    logger.info(f"Getting reachability results for job: {job_id}")
+    
+    # Check multiple possible locations for the reachability data
+    possible_paths = [
+        f"/app/data/exports/{job_id}/reachability_matrix.json",  # Standard path
+        f"/app/data/discovery/{job_id}/reachability_matrix.json",  # Alternative path used by some modules
+        f"/app/data/exports/reachability_matrix.json"  # Fallback path
+    ]
+    
+    # Try each path
+    for path in possible_paths:
+        logger.info(f"Checking for reachability data at: {path}")
+        if os.path.exists(path):
+            logger.info(f"Found reachability data at: {path}")
+            try:
+                with open(path, 'r') as f:
+                    reachability_data = json.load(f)
+                return reachability_data
+            except Exception as e:
+                logger.error(f"Error reading reachability data from {path}: {str(e)}")
+    
+    # If file doesn't exist, check if we have reachability data in the job results
+    if job_id in discovery_results:
+        logger.info(f"Checking in-memory results for job: {job_id}")
+        result = discovery_results[job_id]
+        
+        # Check if this was a reachability scan
+        if result.get("mode") in ["subnet", "seed-device", "full-pipeline"]:
+            # Extract reachability data from the result
+            if "result" in result and "stats" in result["result"]:
+                stats = result["result"]["stats"]
+                
+                # Look for reachability data in various formats
+                if "results" in stats:
+                    logger.info(f"Found reachability data in memory for job: {job_id}")
+                    
+                    # Save the data to a file for future requests
+                    try:
+                        export_dir = f"/app/data/exports/{job_id}"
+                        os.makedirs(export_dir, exist_ok=True)
+                        reachability_file = f"{export_dir}/reachability_matrix.json"
+                        with open(reachability_file, 'w') as f:
+                            json.dump(stats, f, indent=2, cls=DateTimeEncoder)
+                        logger.info(f"Saved reachability data to: {reachability_file}")
+                    except Exception as e:
+                        logger.warning(f"Error saving reachability data to file: {str(e)}")
+                    
+                    return stats
+    
+    # If we couldn't find reachability data
+    logger.warning(f"Reachability data not found for job: {job_id}")
+    raise HTTPException(status_code=404, detail="Reachability data not found for this job")
+
+
 async def run_discovery_job(job_id: str, config: DiscoveryConfig, method: str):
     """Run a discovery job in the background."""
     try:
@@ -538,6 +641,56 @@ async def run_discovery_job(job_id: str, config: DiscoveryConfig, method: str):
         # Run discovery
         result = await discovery.run_discovery()
         
+        # Generate export files based on the mode
+        export_dir = f"/app/data/exports/{job_id}"
+        try:
+            os.makedirs(export_dir, exist_ok=True)
+            
+            # For subnet or seed-device mode, export reachability data
+            if config.mode in ["subnet", "seed-device"] and result.stats:
+                # Save reachability matrix
+                from app.utils import write_artifact
+                artifact_path = write_artifact(job_id, "reachability_matrix.json", result.stats)
+                result.stats["artifact"] = artifact_path
+            
+            # For full-pipeline mode, export all data
+            if config.mode == "full-pipeline":
+                # Export device inventory
+                ConfigExporter.export_inventory_report(
+                    result.devices, 
+                    f"{export_dir}/device_inventory.csv"
+                )
+                
+                # Export interface inventory
+                ConfigExporter.export_interface_report(
+                    result.devices, 
+                    f"{export_dir}/interface_inventory.csv"
+                )
+                
+                # Export topology as JSON
+                topology_data = {
+                    "devices": result.devices,
+                    "connections": result.connections
+                }
+                TopologyExporter.export_to_json(
+                    topology_data, 
+                    f"{export_dir}/topology.json"
+                )
+                
+                # Export topology as HTML
+                TopologyExporter.export_to_html(
+                    topology_data, 
+                    f"{export_dir}/topology.html"
+                )
+                
+                # Export configs
+                ConfigExporter.export_raw_configs(
+                    result.devices, 
+                    f"{export_dir}/configs"
+                )
+        except Exception as e:
+            logger.error(f"Error generating export files: {str(e)}")
+        
         # Update job status with result
         discovery_results[job_id].update({
             "status": "completed",
@@ -546,7 +699,16 @@ async def run_discovery_job(job_id: str, config: DiscoveryConfig, method: str):
         })
         
         # Log completion
-        logger.info(f"Job {job_id} completed successfully. Found {result.total_devices_found} devices.")
+        if config.mode in ["subnet", "seed-device"]:
+            summary = result.stats.get("summary", {})
+            logger.info(
+                f"Job {job_id} completed successfully. "
+                f"Scanned {summary.get('total_scanned', 0)} hosts, "
+                f"found {summary.get('icmp_reachable', 0)} reachable via ICMP, "
+                f"{summary.get('port_22_open', 0)} with SSH open."
+            )
+        else:
+            logger.info(f"Job {job_id} completed successfully. Found {result.total_devices_found} devices.")
         
     except Exception as e:
         logger.error(f"Error running discovery job {job_id}: {str(e)}")
