@@ -788,9 +788,17 @@ async def run_discovery_job(job_id: str, config: DiscoveryConfig, method: str):
         # Log completion
         if config.mode in ["subnet", "seed-device"]:
             summary = result.stats.get("summary", {})
+            
+            # Check for attempted_hosts which is more accurate than total_scanned
+            total_scanned = summary.get('attempted_hosts', summary.get('total_scanned', 0))
+            
+            # If we still don't have a count, try to get it from the results
+            if total_scanned == 0 and 'results' in result.stats:
+                total_scanned = len(result.stats.get('results', []))
+            
             logger.info(
                 f"Job {job_id} completed successfully. "
-                f"Scanned {summary.get('total_scanned', 0)} hosts, "
+                f"Scanned {total_scanned} hosts, "
                 f"found {summary.get('icmp_reachable', 0)} reachable via ICMP, "
                 f"{summary.get('port_22_open', 0)} with SSH open."
             )

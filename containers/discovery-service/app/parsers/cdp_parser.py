@@ -15,6 +15,11 @@ class CDPParser:
     """Parser for CDP neighbor output."""
     
     @staticmethod
+    def parse(output: str, device_type: str = "cisco_ios") -> List[Dict[str, Any]]:
+        """Alias for parse_cdp_output for backward compatibility"""
+        return CDPParser.parse_cdp_output(output, device_type)
+    
+    @staticmethod
     def parse_cdp_output(output: str, device_type: str) -> List[Dict[str, Any]]:
         """
         Parse CDP neighbor output into structured data.

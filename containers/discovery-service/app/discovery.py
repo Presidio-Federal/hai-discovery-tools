@@ -139,8 +139,10 @@ class NetworkDiscovery:
         result.start_time = datetime.now()
         
         try:
-            # Extract subnets from seed devices
-            subnets = await introspect_seed_devices(self.config)
+            # Extract subnets and devices from seed devices
+            seed_result = await introspect_seed_devices(self.config)
+            subnets = seed_result.get("subnets", [])
+            seed_devices = seed_result.get("devices", {})
             
             # Log extracted subnets
             loguru_logger.info(
@@ -149,10 +151,20 @@ class NetworkDiscovery:
                 subnets=subnets
             )
             
+            # Initialize the result with seed devices
+            if seed_devices:
+                result.devices = seed_devices
+                result.total_devices_found = len(seed_devices)
+                result.successful_connections = len(seed_devices)
+                loguru_logger.info(
+                    f"Successfully connected to {len(seed_devices)} seed devices",
+                    job_id=self.config.job_id
+                )
+            
             # If no subnets were extracted, fall back to direct device discovery
-            if not subnets:
+            if not subnets and not seed_devices:
                 loguru_logger.warning(
-                    "No subnets extracted from seed devices, falling back to direct device discovery",
+                    "No subnets or devices extracted from seed devices, falling back to direct device discovery",
                     job_id=self.config.job_id
                 )
                 
@@ -172,6 +184,19 @@ class NetworkDiscovery:
                     "extracted_subnets.json",
                     {"subnets": subnets}
                 )
+                
+            # If we have seed devices but no subnets, we can still return the seed devices
+            if seed_devices and not subnets:
+                std_logger.warning("Found seed devices but no subnets to scan. Will return just the seed devices.")
+                result.end_time = datetime.now()
+                result.status = "completed"
+                return result
+                
+            # Log the subnets that were extracted
+            std_logger.info(f"Extracted {len(subnets)} subnets to scan: {subnets}")
+            
+            # Log the subnets we're going to scan
+            std_logger.info(f"Scanning {len(subnets)} subnets: {subnets}")
             
             # Create a new config with the extracted subnets
             reachability_config = DiscoveryConfig(
@@ -182,11 +207,42 @@ class NetworkDiscovery:
                 stats=self.config.stats
             )
             
+            # Add probe_ports if they exist in the original config
+            probe_ports = [22, 443]  # Default probe ports
+            if hasattr(self.config, 'stats') and 'probe_ports' in self.config.stats:
+                probe_ports = self.config.stats['probe_ports']
+            
+            # Ensure probe_ports is set in the reachability config
+            reachability_config.stats['probe_ports'] = probe_ports
+            std_logger.info(f"Using probe ports: {probe_ports}")
+            
             # Create IP reachability discovery instance
             ip_reachability = IPReachabilityDiscovery(reachability_config)
             
             # Run IP reachability discovery
-            result = await ip_reachability.run()
+            std_logger.info(f"Starting IP reachability scan for {len(subnets)} subnets")
+            try:
+                reachability_result = await ip_reachability.run()
+                std_logger.info(f"IP reachability scan completed. Found {len(reachability_result.devices)} devices.")
+            except Exception as e:
+                std_logger.error(f"Error during IP reachability scan: {str(e)}")
+                # Create an empty result to continue
+                reachability_result = DiscoveryResult()
+                reachability_result.devices = {}
+            
+            # Merge reachability results with seed device results
+            if seed_devices:
+                # Keep the seed devices we already have
+                for ip, device in seed_devices.items():
+                    if ip not in reachability_result.devices:
+                        reachability_result.devices[ip] = device
+                
+                # Update device counts
+                reachability_result.total_devices_found = len(reachability_result.devices)
+                reachability_result.successful_connections = len(seed_devices) + reachability_result.successful_connections
+            
+            # Update the result
+            result = reachability_result
             
             # Save results to file
             if self.config.job_id:
@@ -198,6 +254,63 @@ class NetworkDiscovery:
                 
                 # Add artifact path to result stats
                 result.stats["artifact"] = artifact_path
+            
+            # After reachability scan, run the full discovery on all found devices
+            std_logger.info("Reachability scan complete. Now running full discovery on all found devices...")
+            
+            # Create a new config for the full pipeline
+            # Preserve the original seed devices with their ports
+            preserved_seed_devices = []
+            for ip, device in result.devices.items():
+                # Check if the device has credentials_used with a port
+                if hasattr(device, 'credentials_used') and device.credentials_used and 'port' in device.credentials_used:
+                    port = device.credentials_used['port']
+                    preserved_seed_devices.append(f"{ip}:{port}")
+                    std_logger.info(f"Preserving port {port} for seed device {ip}")
+                else:
+                    preserved_seed_devices.append(ip)
+            
+            # Use the original seed devices if we couldn't extract any with ports
+            if not preserved_seed_devices:
+                preserved_seed_devices = self.config.seed_devices
+                std_logger.info(f"Using original seed devices: {preserved_seed_devices}")
+            
+            # Create the full pipeline config with preserved ports
+            full_pipeline_config = DiscoveryConfig(
+                seed_devices=preserved_seed_devices,
+                credentials=self.config.credentials,
+                max_depth=self.config.max_depth,
+                discovery_protocols=self.config.discovery_protocols,
+                timeout=self.config.timeout,
+                concurrent_connections=self.config.concurrent_connections,
+                retry_count=self.config.retry_count,
+                exclude_patterns=self.config.exclude_patterns,
+                mode="full-pipeline",
+                job_id=self.config.job_id,
+                stats=self.config.stats
+            )
+            
+            # Create a new discovery instance with the full pipeline method
+            from app.discovery_methods.neighbor_discovery import NeighborDiscovery
+            full_pipeline = NeighborDiscovery(full_pipeline_config)
+            
+            # Run the full discovery
+            try:
+                full_result = await full_pipeline.run()
+                
+                # Merge the seed devices with the full discovery results
+                for ip, device in result.devices.items():
+                    if ip not in full_result.devices:
+                        full_result.devices[ip] = device
+                
+                # Update the result with the full discovery results
+                result = full_result
+                
+                # Log completion of full discovery
+                std_logger.info(f"Full discovery completed. Found {result.total_devices_found} devices.")
+            except Exception as e:
+                std_logger.error(f"Full discovery error: {str(e)}")
+                # Keep the reachability results if full discovery fails
             
             # Log completion
             loguru_logger.info(

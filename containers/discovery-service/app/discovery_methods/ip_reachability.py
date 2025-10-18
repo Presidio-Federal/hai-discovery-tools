@@ -84,6 +84,11 @@ class IPReachabilityDiscovery(DiscoveryMethodBase):
         start_time = time.time()
         
         try:
+            # Log what we're about to scan
+            logger.info(f"Starting IP reachability scan for {len(self.subnets)} subnets: {self.subnets}")
+            logger.info(f"Using probe ports: {self.probe_ports}")
+            logger.info(f"Using concurrency: {self.concurrency}")
+            
             # Discover reachable hosts
             reachability_results = await self.discover_reachable_hosts(
                 self.subnets,
@@ -171,11 +176,18 @@ class IPReachabilityDiscovery(DiscoveryMethodBase):
         ports_summary = {port: 0 for port in probe_ports}
         
         # Process each subnet
+        attempted_hosts = 0
         for subnet in unique_subnets:
             try:
                 # Parse subnet
                 network = ipaddress.ip_network(subnet, strict=False)
-                total_hosts += network.num_addresses - 2  # Exclude network and broadcast addresses
+                subnet_host_count = network.num_addresses
+                if subnet_host_count > 2:  # If not a /31 or /32
+                    subnet_host_count -= 2  # Exclude network and broadcast addresses
+                
+                # Count all attempted hosts
+                attempted_hosts += subnet_host_count
+                total_hosts += subnet_host_count
                 
                 # For small networks, scan all hosts at once
                 if network.num_addresses <= 256:
@@ -193,8 +205,12 @@ class IPReachabilityDiscovery(DiscoveryMethodBase):
                         subnet_results = await self._scan_hosts(targets, probe_ports, concurrency)
                         results.extend(subnet_results)
                 
+                logger.info(f"Successfully scanned subnet {subnet}: {len(subnet_results)} hosts processed")
+                
             except Exception as e:
                 logger.error(f"Error scanning subnet {subnet}: {str(e)}")
+                # Even if there was an error, we still attempted to scan these hosts
+                # Don't decrement total_hosts here
         
         # Calculate summary statistics
         for host_result in results:
@@ -209,6 +225,8 @@ class IPReachabilityDiscovery(DiscoveryMethodBase):
             "results": results,
             "summary": {
                 "total_scanned": total_hosts,
+                "attempted_hosts": attempted_hosts,
+                "successful_results": len(results),
                 "icmp_reachable": icmp_reachable,
                 **{f"port_{port}_open": count for port, count in ports_summary.items()}
             },
@@ -441,7 +459,10 @@ class IPReachabilityDiscovery(DiscoveryMethodBase):
                         except asyncssh.DisconnectError:
                             # If we get a disconnect error, the port is open but auth failed
                             return True
-                        except (asyncssh.ConnectionRefusedError, asyncssh.TimeoutError):
+                        except Exception as e:
+                            # Handle any connection errors - port is closed or unreachable
+                            error_msg = str(e) if str(e) else repr(e)
+                            logger.debug(f"SSH connection error to {ip}:{port}: {error_msg}")
                             return False
                 except ImportError:
                     # Fall back to standard TCP check if asyncssh is not available
@@ -460,11 +481,13 @@ class IPReachabilityDiscovery(DiscoveryMethodBase):
                 await writer.wait_closed()
                 
                 return True
-                
-            except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
+            except (asyncio.TimeoutError, ConnectionRefusedError, OSError) as e:
+                error_msg = str(e) if str(e) else repr(e)
+                logger.debug(f"TCP connection error to {ip}:{port}: {error_msg}")
                 return False
             except Exception as e:
-                logger.error(f"Error checking port {port} on {ip}: {str(e)}")
+                error_msg = str(e) if str(e) else repr(e)
+                logger.error(f"Error checking port {port} on {ip}: {error_msg}")
                 return False
 
 # Fix missing import
