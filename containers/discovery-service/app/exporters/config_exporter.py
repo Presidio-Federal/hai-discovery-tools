@@ -276,7 +276,8 @@ class ConfigExporter:
     @classmethod
     def export_inventory_report(cls, devices: Dict[str, Any], output_file: str) -> bool:
         """
-        Export a network inventory report in CSV format.
+        DEPRECATED: Use export_inventory_json instead.
+        This method is kept for backward compatibility but redirects to export_inventory_json.
         
         Args:
             devices: Dictionary of devices with their information
@@ -285,81 +286,14 @@ class ConfigExporter:
         Returns:
             True if successful, False otherwise
         """
-        try:
-            # Make sure we're using the /app/data directory
-            if not output_file.startswith("/app/data/"):
-                output_file = f"/app/data/exports/{os.path.basename(output_file)}"
-                
-            # Create directory if it doesn't exist
-            try:
-                os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
-            except PermissionError:
-                logger.warning(f"Permission denied creating directory for {output_file}")
-                # Try to use a directory we know exists
-                output_file = f"/app/data/exports/{os.path.basename(output_file)}"
-            
-            # Write CSV header
-            with open(output_file, 'w') as f:
-                f.write("IP Address,Hostname,Platform,OS Version,Model,Serial Number,Status\n")
-                
-                # Write device information
-                for ip, device in devices.items():
-                    # Clean up hostname if it contains error message
-                    hostname = device.get("hostname", "")
-                    if hostname and (hostname.startswith("^") or "Invalid input" in hostname):
-                        # Try to get hostname from parsed_config
-                        parsed_config = device.get("parsed_config", {})
-                        if isinstance(parsed_config, dict) and "hostname" in parsed_config:
-                            hostname = parsed_config["hostname"]
-                        else:
-                            hostname = ""
-                        
-                    # Get device information from various sources
-                    platform = device.get("platform", "")
-                    os_version = device.get("os_version", "")
-                    
-                    # Try to get model from device_info or parsed_config
-                    model = device.get("model", "")
-                    if not model and "parsed_config" in device:
-                        # Try to extract model from parsed config
-                        parsed_config = device.get("parsed_config", {})
-                        if isinstance(parsed_config, dict):
-                            # Check inventory section if it exists
-                            if "inventory" in parsed_config and isinstance(parsed_config["inventory"], list):
-                                for item in parsed_config["inventory"]:
-                                    if item.get("name", "").lower() == "chassis":
-                                        model = item.get("pid", "")
-                                        break
-                    
-                    # Try to get serial number from device_info or parsed_config
-                    serial = device.get("serial_number", "")
-                    if not serial and "parsed_config" in device:
-                        # Try to extract serial from parsed config
-                        parsed_config = device.get("parsed_config", {})
-                        if isinstance(parsed_config, dict):
-                            # Check inventory section if it exists
-                            if "inventory" in parsed_config and isinstance(parsed_config["inventory"], list):
-                                for item in parsed_config["inventory"]:
-                                    if item.get("name", "").lower() == "chassis":
-                                        serial = item.get("sn", "")
-                                        break
-                    
-                    status = device.get("discovery_status", "")
-                    
-                    # Escape any commas in fields
-                    hostname = hostname.replace(",", "_")
-                    platform = platform.replace(",", "_")
-                    os_version = os_version.replace(",", "_")
-                    model = model.replace(",", "_")
-                    serial = serial.replace(",", "_")
-                    
-                    f.write(f"{ip},{hostname},{platform},{os_version},{model},{serial},{status}\n")
-                    
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error exporting inventory report: {str(e)}")
-            return False
+        # Redirect to the JSON export method
+        # Convert the output file path to .json extension
+        json_output_file = output_file
+        if output_file.endswith('.csv'):
+            json_output_file = output_file.replace('.csv', '.json')
+        
+        logger.warning(f"export_inventory_report is deprecated. Redirecting to export_inventory_json with file: {json_output_file}")
+        return cls.export_inventory_json(devices, json_output_file)
     
     @classmethod
     def export_interface_json(cls, devices: Dict[str, Any], output_file: str) -> bool:
@@ -444,7 +378,8 @@ class ConfigExporter:
     @classmethod
     def export_interface_report(cls, devices: Dict[str, Any], output_file: str) -> bool:
         """
-        Export a network interface report in CSV format.
+        DEPRECATED: Use export_interface_json instead.
+        This method is kept for backward compatibility but redirects to export_interface_json.
         
         Args:
             devices: Dictionary of devices with their interface information
@@ -453,118 +388,11 @@ class ConfigExporter:
         Returns:
             True if successful, False otherwise
         """
-        try:
-            # Make sure we're using the /app/data directory
-            if not output_file.startswith("/app/data/"):
-                output_file = f"/app/data/exports/{os.path.basename(output_file)}"
-                
-            # Create directory if it doesn't exist
-            try:
-                os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
-            except PermissionError:
-                logger.warning(f"Permission denied creating directory for {output_file}")
-                # Try to use a directory we know exists
-                output_file = f"/app/data/exports/{os.path.basename(output_file)}"
-            
-            # Write CSV header
-            with open(output_file, 'w') as f:
-                f.write("Device IP,Hostname,Interface Name,IP Address,Description,Status,VLAN,Connected To\n")
-                
-                # Write interface information
-                for ip, device in devices.items():
-                    # Clean up hostname if it contains error message
-                    hostname = device.get("hostname", "")
-                    if hostname and (hostname.startswith("^") or "Invalid input" in hostname):
-                        # Try to get hostname from parsed_config
-                        parsed_config = device.get("parsed_config", {})
-                        if isinstance(parsed_config, dict) and "hostname" in parsed_config:
-                            hostname = parsed_config["hostname"]
-                        else:
-                            hostname = ""
-                    
-                    # Try to get interfaces from device
-                    interfaces = []
-                    
-                    # Handle different ways interfaces might be stored
-                    if "interfaces" in device:
-                        device_interfaces = device.get("interfaces", [])
-                        # Check if it's a list or another data type
-                        if isinstance(device_interfaces, list):
-                            interfaces = device_interfaces
-                        elif hasattr(device_interfaces, '__iter__'):
-                            # Convert iterable to list
-                            interfaces = list(device_interfaces)
-                    
-                    # If interfaces is empty, try to get from the device object's __dict__ if it has one
-                    if not interfaces and hasattr(device, '__dict__') and hasattr(device.__dict__, 'get'):
-                        device_dict = device.__dict__
-                        if "interfaces" in device_dict:
-                            device_interfaces = device_dict.get("interfaces", [])
-                            if isinstance(device_interfaces, list):
-                                interfaces = device_interfaces
-                    
-                    # If still no interfaces found, try to extract from parsed_config
-                    if not interfaces and "parsed_config" in device:
-                        parsed_config = device.get("parsed_config", {})
-                        if isinstance(parsed_config, dict) and "interfaces" in parsed_config:
-                            parsed_interfaces = parsed_config.get("interfaces", [])
-                            if isinstance(parsed_interfaces, list):
-                                # Convert parsed interfaces to the expected format
-                                for intf in parsed_interfaces:
-                                    interfaces.append({
-                                        "name": intf.get("name", ""),
-                                        "ip_address": intf.get("ip_address", ""),
-                                        "description": intf.get("description", ""),
-                                        "status": "up" if not intf.get("shutdown", True) else "down",
-                                        "vlan": intf.get("vlan", ""),
-                                    })
-                    
-                    # Last resort: try to access interfaces directly as an attribute
-                    if not interfaces and hasattr(device, 'interfaces'):
-                        device_interfaces = device.interfaces
-                        if isinstance(device_interfaces, list):
-                            interfaces = device_interfaces
-                    
-                    # Add connection information from neighbors
-                    neighbor_connections = {}
-                    for neighbor in device.get("neighbors", []):
-                        local_intf = neighbor.get("local_interface", "")
-                        remote_host = neighbor.get("hostname", "")
-                        remote_intf = neighbor.get("remote_interface", "")
-                        if local_intf and remote_host:
-                            neighbor_connections[local_intf] = f"{remote_host} ({remote_intf})"
-                    
-                    # Debug log the number of interfaces
-                    logger.info(f"Device {ip} ({hostname}) has {len(interfaces)} interfaces to export")
-                    
-                    # Write each interface
-                    for interface in interfaces:
-                        # Debug log the interface details
-                        logger.info(f"Processing interface: {interface}")
-                        
-                        # Handle both dictionary and object interfaces
-                        if hasattr(interface, 'name'):
-                            # It's an object
-                            name = interface.name
-                            intf_ip = interface.ip_address if hasattr(interface, 'ip_address') else ""
-                            description = (interface.description or "").replace(",", " ") if hasattr(interface, 'description') else ""
-                            status = interface.status if hasattr(interface, 'status') else ""
-                            vlan = interface.vlan if hasattr(interface, 'vlan') else ""
-                        else:
-                            # It's a dictionary
-                            name = interface.get("name", "")
-                            intf_ip = interface.get("ip_address", "")
-                            description = interface.get("description", "").replace(",", " ")
-                            status = interface.get("status", "")
-                            vlan = interface.get("vlan", "")
-                        
-                        # Get connected_to from neighbor connections
-                        connected_to = neighbor_connections.get(name, interface.get("connected_to", ""))
-                        
-                        f.write(f"{ip},{hostname},{name},{intf_ip},{description},{status},{vlan},{connected_to}\n")
-                    
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error exporting interface report: {str(e)}")
-            return False
+        # Redirect to the JSON export method
+        # Convert the output file path to .json extension
+        json_output_file = output_file
+        if output_file.endswith('.csv'):
+            json_output_file = output_file.replace('.csv', '.json')
+        
+        logger.warning(f"export_interface_report is deprecated. Redirecting to export_interface_json with file: {json_output_file}")
+        return cls.export_interface_json(devices, json_output_file)

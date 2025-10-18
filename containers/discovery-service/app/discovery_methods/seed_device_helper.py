@@ -143,7 +143,24 @@ async def introspect_seed_devices(config: DiscoveryConfig) -> Dict[str, Any]:
                                     )
                                     
                                     # Extract subnet mask from detailed interface output
+                                    # Try multiple patterns to match different output formats
+                                    mask_match = None
+                                    
+                                    # Pattern 1: Internet address is x.x.x.x/prefix
                                     mask_match = re.search(f"{intf_name}.*?Internet address is.*?/(\\d+)", detailed_interfaces_output, re.DOTALL)
+                                    
+                                    # Pattern 2: Internet address is x.x.x.x subnet_mask
+                                    if not mask_match:
+                                        ip_mask_match = re.search(f"{intf_name}.*?Internet address is\\s+(\\d+\\.\\d+\\.\\d+\\.\\d+)\\s+(\\d+\\.\\d+\\.\\d+\\.\\d+)", detailed_interfaces_output, re.DOTALL)
+                                        if ip_mask_match:
+                                            intf.subnet_mask = ip_mask_match.group(2)
+                                    
+                                    # Pattern 3: For loopback interfaces, default to /32 (255.255.255.255)
+                                    if not mask_match and not intf.subnet_mask and intf_name.lower().startswith("loopback"):
+                                        intf.subnet_mask = "255.255.255.255"
+                                        logger.info(f"Applied /32 (255.255.255.255) subnet mask to loopback interface {intf_name}")
+                                    
+                                    # Process prefix match if found
                                     if mask_match:
                                         prefix = mask_match.group(1)
                                         # Convert prefix to subnet mask
@@ -152,7 +169,15 @@ async def introspect_seed_devices(config: DiscoveryConfig) -> Dict[str, Any]:
                                             mask = str(ipaddress.IPv4Network(f"0.0.0.0/{prefix}").netmask)
                                             intf.subnet_mask = mask
                                         except:
-                                            pass
+                                            # If conversion fails, default to /32 for safety
+                                            if intf_name.lower().startswith("loopback"):
+                                                intf.subnet_mask = "255.255.255.255"
+                                                logger.info(f"Failed to convert prefix, applied /32 (255.255.255.255) subnet mask to loopback interface {intf_name}")
+                                    
+                                    # If still no subnet mask, default to /32 for all interfaces as a guardrail
+                                    if not intf.subnet_mask and intf.ip_address:
+                                        intf.subnet_mask = "255.255.255.255"
+                                        logger.info(f"Applied guardrail /32 (255.255.255.255) subnet mask to interface {intf_name} with IP {intf.ip_address}")
                                     
                                     # Extract description from detailed interface output
                                     desc_match = re.search(f"{intf_name}.*?Description: (.*?)\\n", detailed_interfaces_output, re.DOTALL)
@@ -334,21 +359,16 @@ def parse_route_output(output: str) -> Set[str]:
             subnets.add(f"{network}/32")
             logger.info(f"Added host IP {network}/32 from route output")
     
-    # If we didn't find any subnets but the output contains "directly connected",
+            # If we didn't find any subnets but the output contains "directly connected",
     # try a more aggressive pattern
     if not subnets and "connected" in output:
         ip_pattern = r'(\d+\.\d+\.\d+\.\d+)'
         for match in re.finditer(ip_pattern, output):
             ip = match.group(1)
             if ip != "0.0.0.0" and ip != "255.255.255.255":
-                # Add both the IP as a /32 and a derived /24 subnet
-                subnets.add(f"{ip}/32")
-                
-                # Derive a /24 subnet
-                ip_parts = ip.split('.')
-                if len(ip_parts) == 4:
-                    network = f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.0/24"
-                    subnets.add(network)
-                    logger.info(f"Added fallback subnet {network} from route output containing IP {ip}")
+                # Add the IP as a /32 - GUARDRAIL: Default to /32 instead of broader subnets
+                host_subnet = f"{ip}/32"
+                subnets.add(host_subnet)
+                logger.info(f"Added host IP {host_subnet} from route output as a guardrail (defaulting to /32)")
     
     return subnets

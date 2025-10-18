@@ -429,20 +429,22 @@ def export_discovery_data(
             headers={"Content-Disposition": f"attachment; filename=discovery_{job_id}.json"}
         )
         
+    # CSV format has been removed in favor of JSON
+    # This section is kept as a placeholder for backward compatibility
     elif format == "csv":
-        # Export device inventory to CSV
+        # Export device inventory as JSON instead
         devices = result["result"].get("devices", {})
-        inventory_file = f"{export_dir}/device_inventory.csv"
+        inventory_file = f"{export_dir}/device_inventory.json"
         
-        # Generate the CSV file
-        ConfigExporter.export_inventory_report(devices, inventory_file)
+        # Generate the JSON file
+        ConfigExporter.export_inventory_json(devices, inventory_file)
         
         # Return the file as an attachment
         return FileResponse(
             path=inventory_file,
-            filename=f"device_inventory_{job_id}.csv",
-            media_type="text/csv",
-            headers={"Content-Disposition": f"attachment; filename=device_inventory_{job_id}.csv"}
+            filename=f"device_inventory_{job_id}.json",
+            media_type="application/json",
+            headers={"Content-Disposition": f"attachment; filename=device_inventory_{job_id}.json"}
         )
         
     elif format == "html":
@@ -786,7 +788,8 @@ async def run_discovery_job(job_id: str, config: DiscoveryConfig, method: str):
         })
         
         # Log completion
-        if config.mode in ["subnet", "seed-device"]:
+        if config.mode == "subnet":
+            # For subnet mode, only report on the reachability scan
             summary = result.stats.get("summary", {})
             
             # Check for attempted_hosts which is more accurate than total_scanned
@@ -802,8 +805,51 @@ async def run_discovery_job(job_id: str, config: DiscoveryConfig, method: str):
                 f"found {summary.get('icmp_reachable', 0)} reachable via ICMP, "
                 f"{summary.get('port_22_open', 0)} with SSH open."
             )
+        elif config.mode == "seed-device":
+            # For seed-device mode, report both on devices found and hosts scanned
+            summary = result.stats.get("summary", {})
+            
+            # Check for attempted_hosts which is more accurate than total_scanned
+            total_scanned = summary.get('attempted_hosts', summary.get('total_scanned', 0))
+            
+            # If we still don't have a count, try to get it from the results
+            if total_scanned == 0 and 'results' in result.stats:
+                total_scanned = len(result.stats.get('results', []))
+                
+            # Get device counts
+            total_devices = result.total_devices_found
+            successful_devices = result.successful_connections
+            
+            logger.info(
+                f"Job {job_id} completed successfully. "
+                f"Found {total_devices} devices ({successful_devices} successful connections). "
+                f"Scanned {total_scanned} hosts, "
+                f"found {summary.get('icmp_reachable', 0)} reachable via ICMP, "
+                f"{summary.get('port_22_open', 0)} with SSH open."
+            )
         else:
-            logger.info(f"Job {job_id} completed successfully. Found {result.total_devices_found} devices.")
+            # For full-pipeline mode - also include scan count from stats if available
+            summary = result.stats.get("summary", {})
+            total_devices = result.total_devices_found
+            successful_devices = result.successful_connections
+            
+            # Check for attempted_hosts which is more accurate than total_scanned
+            total_scanned = summary.get('attempted_hosts', summary.get('total_scanned', 0))
+            
+            # If we still don't have a count, try to get it from the results
+            if total_scanned == 0 and 'results' in result.stats:
+                total_scanned = len(result.stats.get('results', []))
+                
+            # Count SSH connections attempted as a fallback
+            if total_scanned == 0:
+                # At minimum, we tried to connect to each device
+                total_scanned = result.total_devices_found + result.failed_connections
+                
+            logger.info(
+                f"Job {job_id} completed successfully. "
+                f"Found {total_devices} devices ({successful_devices} successful connections). "
+                f"Scanned {total_scanned} hosts."
+            )
         
     except Exception as e:
         logger.error(f"Error running discovery job {job_id}: {str(e)}")

@@ -226,21 +226,56 @@ Data in the requested format.
 
 ### Export Device Inventory
 
-Exports device inventory as CSV.
+Exports device inventory as JSON.
 
 **Endpoint:** `GET /discover/{job_id}/export/device_inventory`
 
 **Response:**
-CSV file containing device inventory information.
+JSON file containing device inventory information:
+
+```json
+{
+  "devices": [
+    {
+      "ip_address": "192.168.1.1",
+      "hostname": "CORE-SW01",
+      "platform": "cisco_ios",
+      "os_version": "16.9.4",
+      "model": "WS-C3850-48T",
+      "serial_number": "FOC1234A5BC",
+      "status": "discovered"
+    },
+    // More devices...
+  ]
+}
+```
 
 ### Export Interface Inventory
 
-Exports interface inventory as CSV.
+Exports interface inventory as JSON.
 
 **Endpoint:** `GET /discover/{job_id}/export/interface_inventory`
 
 **Response:**
-CSV file containing interface inventory information.
+JSON file containing interface inventory information:
+
+```json
+{
+  "interfaces": [
+    {
+      "device_ip": "192.168.1.1",
+      "device_hostname": "CORE-SW01",
+      "name": "GigabitEthernet1/0/1",
+      "ip_address": "192.168.1.1",
+      "description": "Link to DIST-SW01",
+      "status": "up",
+      "vlan": null,
+      "connected_to": "DIST-SW01:GigabitEthernet1/0/1"
+    },
+    // More interfaces...
+  ]
+}
+```
 
 ### Get Reachability Results
 

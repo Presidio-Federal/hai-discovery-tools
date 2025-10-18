@@ -20,7 +20,7 @@ The Discovery Service is a containerized application that discovers network devi
 - **Visualization & Export**:
   - Maps network topology with port-to-port connections
   - Provides interactive visualization of the network topology
-  - Exports data in various formats (JSON, CSV, HTML)
+  - Exports data in various formats (JSON, HTML)
   - Generates reachability matrices for network analysis
 
 ### Getting Started
@@ -166,8 +166,8 @@ The Discovery Service provides a RESTful API for network discovery operations.
 - `GET /discover/{job_id}/topology` - Get network topology visualization
 - `GET /discover/{job_id}/export` - Export discovery data
 - `GET /discover/{job_id}/reachability` - Get IP reachability results
-- `GET /discover/{job_id}/export/device_inventory` - Export device inventory as CSV
-- `GET /discover/{job_id}/export/interface_inventory` - Export interface inventory as CSV
+- `GET /discover/{job_id}/export/device_inventory` - Export device inventory as JSON
+- `GET /discover/{job_id}/export/interface_inventory` - Export interface inventory as JSON
 
 For detailed documentation, see:
 - [API Documentation](docs/api.md)
