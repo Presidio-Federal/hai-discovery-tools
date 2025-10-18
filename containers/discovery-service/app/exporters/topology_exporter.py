@@ -205,8 +205,84 @@ class TopologyExporter:
             # Clean up the data before sending it to the browser
             cleaned_data = {
                 "devices": {},
-                "connections": topology_data.get("connections", [])
+                "connections": []
             }
+            
+            # Process connections to ensure they are properly formatted
+            raw_connections = topology_data.get("connections", [])
+            for conn in raw_connections:
+                if hasattr(conn, 'dict') and callable(conn.dict):
+                    # It's a Pydantic model
+                    cleaned_data["connections"].append(conn.dict())
+                elif isinstance(conn, dict):
+                    # It's already a dictionary
+                    cleaned_data["connections"].append(conn)
+                elif hasattr(conn, '__dict__'):
+                    # It's an object with __dict__
+                    cleaned_data["connections"].append(conn.__dict__)
+                    
+            # If no connections were provided, try to build them from interface data
+            if not cleaned_data["connections"]:
+                logger.info("No connections provided, attempting to build from interface data")
+                built_connections = []
+                
+                # Process each device to find connections
+                for ip, device in topology_data.get("devices", {}).items():
+                    # Get interfaces
+                    interfaces = []
+                    if hasattr(device, 'interfaces'):
+                        if callable(getattr(device, 'interfaces', None)):
+                            interfaces = device.interfaces()
+                        else:
+                            interfaces = device.interfaces
+                    elif isinstance(device, dict) and "interfaces" in device:
+                        interfaces = device["interfaces"]
+                        
+                    # Process each interface
+                    for intf in interfaces:
+                        connected_to = None
+                        local_interface = None
+                        
+                        # Handle different interface formats
+                        if hasattr(intf, 'connected_to'):
+                            connected_to = intf.connected_to
+                            local_interface = intf.name if hasattr(intf, 'name') else None
+                        elif isinstance(intf, dict) and "connected_to" in intf:
+                            connected_to = intf["connected_to"]
+                            local_interface = intf.get("name")
+                            
+                        # If we found a connection, add it
+                        if connected_to and ":" in connected_to:
+                            # Format is typically "hostname:interface"
+                            parts = connected_to.split(":", 1)
+                            remote_hostname = parts[0]
+                            remote_interface = parts[1] if len(parts) > 1 else None
+                            
+                            # Find the IP for the remote hostname
+                            remote_ip = None
+                            for r_ip, r_device in topology_data.get("devices", {}).items():
+                                r_hostname = None
+                                if hasattr(r_device, 'hostname'):
+                                    r_hostname = r_device.hostname
+                                elif isinstance(r_device, dict):
+                                    r_hostname = r_device.get("hostname")
+                                    
+                                if r_hostname and remote_hostname in r_hostname:
+                                    remote_ip = r_ip
+                                    break
+                                    
+                            if remote_ip:
+                                # Add the connection
+                                built_connections.append({
+                                    "source": ip,
+                                    "target": remote_ip,
+                                    "source_port": local_interface,
+                                    "target_port": remote_interface
+                                })
+                                logger.info(f"Built connection: {ip}:{local_interface} -> {remote_ip}:{remote_interface}")
+                
+                # Add the built connections
+                cleaned_data["connections"].extend(built_connections)
             
             # Log connections for debugging
             logger.info(f"Exporting topology with {len(cleaned_data['connections'])} connections")
@@ -220,7 +296,7 @@ class TopologyExporter:
                     target = getattr(conn, 'target', 'unknown')
                 logger.info(f"Connection in export: {source} -> {target}")
             
-            # Process and clean devices
+                # Process and clean devices
             for ip, device in topology_data.get("devices", {}).items():
                 # Handle both dictionary and Pydantic model objects
                 if hasattr(device, 'dict') and callable(device.dict):
@@ -229,14 +305,37 @@ class TopologyExporter:
                     platform = getattr(device, 'platform', "unknown")
                     device_type = getattr(device, 'device_type', "unknown")
                     discovery_status = getattr(device, 'discovery_status', "unknown")
-                    interfaces = getattr(device, 'interfaces', [])
+                    
+                    # Get interfaces and ensure they're properly serialized
+                    interfaces = []
+                    raw_interfaces = getattr(device, 'interfaces', [])
+                    for intf in raw_interfaces:
+                        if hasattr(intf, 'dict') and callable(intf.dict):
+                            interfaces.append(intf.dict())
+                        elif isinstance(intf, dict):
+                            interfaces.append(intf)
+                        elif hasattr(intf, '__dict__'):
+                            interfaces.append(intf.__dict__)
                 else:
                     # It's a dictionary
                     hostname = device.get("hostname", ip)
                     platform = device.get("platform", "unknown")
                     device_type = device.get("device_type", "unknown")
                     discovery_status = device.get("discovery_status", "unknown")
-                    interfaces = device.get("interfaces", [])
+                    
+                    # Get interfaces and ensure they're properly serialized
+                    interfaces = []
+                    raw_interfaces = device.get("interfaces", [])
+                    for intf in raw_interfaces:
+                        if hasattr(intf, 'dict') and callable(intf.dict):
+                            interfaces.append(intf.dict())
+                        elif isinstance(intf, dict):
+                            interfaces.append(intf)
+                        elif hasattr(intf, '__dict__'):
+                            interfaces.append(intf.__dict__)
+                
+                # Log the interfaces for debugging
+                logger.info(f"Device {ip} has {len(interfaces)} interfaces")
                 
                 cleaned_device = {
                     "hostname": hostname,

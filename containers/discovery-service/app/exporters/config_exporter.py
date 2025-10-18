@@ -172,10 +172,16 @@ class ConfigExporter:
                 # Try to use a directory we know exists
                 output_file = f"/app/data/exports/{os.path.basename(output_file)}"
             
+            # Log what we're working with
+            logger.info(f"Exporting inventory for {len(devices)} devices to {output_file}")
+            
             # Prepare device inventory data
             inventory_data = []
             
             for ip, device in devices.items():
+                # Log the device we're processing
+                logger.info(f"Processing device {ip} for inventory export")
+                
                 # Clean up hostname if it contains error message
                 hostname = cls._get_value(device, "hostname", "")
                 if hostname and (str(hostname).startswith("^") or "Invalid input" in str(hostname)):
@@ -203,6 +209,16 @@ class ConfigExporter:
                                     model = item.get("pid", "")
                                     break
                 
+                # If still no model, try to extract from config
+                if not model:
+                    config = cls._get_value(device, "config", "")
+                    if config:
+                        # Look for hardware info in config
+                        if "C8000V" in config:
+                            model = "C8000V"
+                        elif "CSR1000V" in config:
+                            model = "CSR1000V"
+                
                 # Try to get serial number from device_info or parsed_config
                 serial = cls._get_value(device, "serial_number", "")
                 if not serial:
@@ -215,6 +231,16 @@ class ConfigExporter:
                                 if item.get("name", "").lower() == "chassis":
                                     serial = item.get("sn", "")
                                     break
+                
+                # If still no serial, try to extract from config
+                if not serial:
+                    config = cls._get_value(device, "config", "")
+                    if config:
+                        # Look for serial in config
+                        import re
+                        serial_match = re.search(r'license udi pid \S+ sn (\S+)', config)
+                        if serial_match:
+                            serial = serial_match.group(1)
                 
                 status = cls._get_value(device, "discovery_status", "")
                 
@@ -229,16 +255,22 @@ class ConfigExporter:
                     "status": status
                 }
                 
+                # Log the entry we're adding
+                logger.info(f"Adding device to inventory: {hostname} ({ip})")
+                
                 inventory_data.append(device_entry)
             
             # Write JSON data
             with open(output_file, 'w') as f:
                 json.dump({"devices": inventory_data}, f, indent=2, cls=DateTimeEncoder)
                 
+            logger.info(f"Successfully exported {len(inventory_data)} devices to {output_file}")
             return True
             
         except Exception as e:
             logger.error(f"Error exporting inventory JSON: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return False
     
     @classmethod

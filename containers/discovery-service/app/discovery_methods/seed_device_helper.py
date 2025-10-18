@@ -188,8 +188,8 @@ async def introspect_seed_devices(config: DiscoveryConfig) -> Dict[str, Any]:
                             # Continue without neighbors
                             connected_devices[ip_address].neighbors = []
                     
-                    # Parse interface output to find IP addresses and subnets
-                    interface_subnets = parse_interface_output(interfaces_output)
+                    # Parse interface output to find IP addresses, subnets, and loopback IPs
+                    interface_subnets, loopback_ips = parse_interface_output(interfaces_output)
                     subnets.update(interface_subnets)
                     
                     # Parse route output to find connected subnets
@@ -197,6 +197,22 @@ async def introspect_seed_devices(config: DiscoveryConfig) -> Dict[str, Any]:
                     subnets.update(route_subnets)
                     
                     logger.info(f"Extracted {len(interface_subnets)} subnets from interfaces and {len(route_subnets)} subnets from routes on {ip_address}")
+                    
+                    # Add loopback IPs as seed devices to try
+                    if loopback_ips:
+                        logger.info(f"Found {len(loopback_ips)} loopback IPs on {ip_address}: {', '.join(loopback_ips)}")
+                        
+                        # Add loopback IPs to the device's all_ip_addresses
+                        if hasattr(device_info, 'all_ip_addresses'):
+                            for loopback_ip in loopback_ips:
+                                if loopback_ip not in device_info.all_ip_addresses:
+                                    device_info.all_ip_addresses.append(loopback_ip)
+                                    logger.info(f"Added loopback IP {loopback_ip} to device {ip_address} all_ip_addresses")
+                        
+                        # Add loopback IPs as specific subnets to scan
+                        for loopback_ip in loopback_ips:
+                            subnets.add(f"{loopback_ip}/32")
+                            logger.info(f"Added loopback IP {loopback_ip}/32 as a subnet to scan")
                     
                 finally:
                     # Close the connection
@@ -214,17 +230,18 @@ async def introspect_seed_devices(config: DiscoveryConfig) -> Dict[str, Any]:
         "devices": connected_devices
     }
 
-def parse_interface_output(output: str) -> Set[str]:
+def parse_interface_output(output: str) -> tuple[Set[str], Set[str]]:
     """
-    Parse 'show ip interface brief' output to extract subnets.
+    Parse 'show ip interface brief' output to extract subnets and loopback IPs.
     
     Args:
         output: Command output
         
     Returns:
-        Set of subnet CIDRs
+        Tuple of (subnet CIDRs, loopback IPs)
     """
     subnets = set()
+    loopback_ips = set()
     
     # Different patterns for different device types
     # Cisco IOS/IOS-XE pattern
@@ -233,30 +250,41 @@ def parse_interface_output(output: str) -> Set[str]:
     # Cisco NXOS pattern
     pattern2 = r'(\S+)\s+(\d+\.\d+\.\d+\.\d+)/(\d+)'
     
+    import logging
+    logger = logging.getLogger(__name__)
+    
     # Find all matches for pattern 1
     for match in re.finditer(pattern1, output):
+        interface_name = match.group(1)
         ip = match.group(2)
         if ip != "unassigned" and ip != "0.0.0.0" and ip != "dhcp":
-            # For interfaces with IP addresses, add just the host address
-            # We'll rely on the route table for actual subnets
+            # For interfaces with IP addresses, add the host address
             subnets.add(f"{ip}/32")  # Add the host address
             
+            # Check if this is a loopback interface
+            if interface_name.lower().startswith("loopback"):
+                loopback_ips.add(ip)
+                logger.info(f"Found loopback IP: {ip} on {interface_name}")
+            
             # Log what we're adding
-            import logging
-            logger = logging.getLogger(__name__)
             logger.info(f"Added host IP {ip}/32 from interface output")
     
     # Find all matches for pattern 2
     for match in re.finditer(pattern2, output):
+        interface_name = match.group(1)
         ip = match.group(2)
         prefix = match.group(3)
         subnets.add(f"{ip}/{prefix}")
         
+        # Check if this is a loopback interface
+        if interface_name.lower().startswith("loopback"):
+            loopback_ips.add(ip)
+            logger.info(f"Found loopback IP: {ip} on {interface_name}")
+        
         # Log the subnet we found
-        import logging
-        logging.getLogger(__name__).info(f"Added subnet {ip}/{prefix} from interface output")
+        logger.info(f"Added subnet {ip}/{prefix} from interface output")
     
-    return subnets
+    return subnets, loopback_ips
 
 def parse_route_output(output: str) -> Set[str]:
     """

@@ -169,6 +169,18 @@ class IPReachabilityDiscovery(DiscoveryMethodBase):
         # Deduplicate subnets
         unique_subnets = list(set(subnets))
         
+        # Separate loopback IPs (typically /32 addresses starting with 10.)
+        loopback_ips = []
+        regular_subnets = []
+        
+        for subnet in unique_subnets:
+            if subnet.endswith("/32") and (subnet.startswith("10.") or subnet.startswith("192.168.")):
+                # This might be a loopback IP
+                loopback_ips.append(subnet)
+                logger.info(f"Identified potential loopback IP: {subnet}")
+            else:
+                regular_subnets.append(subnet)
+        
         # Initialize results
         results = []
         total_hosts = 0
@@ -177,7 +189,34 @@ class IPReachabilityDiscovery(DiscoveryMethodBase):
         
         # Process each subnet
         attempted_hosts = 0
-        for subnet in unique_subnets:
+        
+        # First, scan the loopback IPs (they're more important)
+        if loopback_ips:
+            logger.info(f"Scanning {len(loopback_ips)} loopback IPs first")
+            for loopback in loopback_ips:
+                try:
+                    # Parse subnet
+                    network = ipaddress.ip_network(loopback, strict=False)
+                    subnet_host_count = network.num_addresses
+                    
+                    # Count all attempted hosts
+                    attempted_hosts += subnet_host_count
+                    total_hosts += subnet_host_count
+                    
+                    # For loopback IPs (which are /32), there's just one host
+                    targets = [str(ip) for ip in network.hosts()]
+                    subnet_results = await self._scan_hosts(targets, probe_ports, concurrency)
+                    results.extend(subnet_results)
+                    
+                    logger.info(f"Successfully scanned loopback IP {loopback}: {len(subnet_results)} hosts processed")
+                    
+                except Exception as e:
+                    logger.error(f"Error scanning loopback IP {loopback}: {str(e)}")
+                    # Even if there was an error, we still attempted to scan these hosts
+                    # Don't decrement total_hosts here
+        
+        # Now scan the regular subnets
+        for subnet in regular_subnets:
             try:
                 # Parse subnet
                 network = ipaddress.ip_network(subnet, strict=False)

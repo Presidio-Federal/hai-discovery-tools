@@ -742,16 +742,16 @@ async def run_discovery_job(job_id: str, config: DiscoveryConfig, method: str):
             
             # For full-pipeline mode, export all data
             if config.mode == "full-pipeline":
-                # Export device inventory
-                ConfigExporter.export_inventory_report(
+                # Export device inventory as JSON
+                ConfigExporter.export_inventory_json(
                     result.devices, 
-                    f"{export_dir}/device_inventory.csv"
+                    f"{export_dir}/device_inventory.json"
                 )
                 
-                # Export interface inventory
-                ConfigExporter.export_interface_report(
+                # Export interface inventory as JSON
+                ConfigExporter.export_interface_json(
                     result.devices, 
-                    f"{export_dir}/interface_inventory.csv"
+                    f"{export_dir}/interface_inventory.json"
                 )
                 
                 # Export topology as JSON
